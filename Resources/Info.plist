@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleDisplayName</key><string>旅迹</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>TravelRecorder</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.2.0</string>
+  <key>CFBundleVersion</key><string>6</string>
+  <key>LSRequiresIPhoneOS</key><true/>
+  <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+  <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+  <key>UILaunchScreen</key><dict/>
+  <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+  <key>UIBackgroundModes</key><array><string>location</string></array>
+  <key>NSLocationWhenInUseUsageDescription</key><string>在你开始记录旅程后，用位置绘制路线；锁屏或拍照时也会继续记录，直到你暂停或结束。</string>
+  <key>NSLocationTemporaryUsageDescriptionDictionary</key><dict><key>RecordTrip</key><string>精确位置用于画出你实际走过的路线。</string></dict>
+  <key>NSPhotoLibraryUsageDescription</key><string>查找旅行期间拍摄的照片，读取拍摄时间和位置，并在旅程中保存独立照片副本。</string>
+  <key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key><true/>
+  <key>ITSAppUsesNonExemptEncryption</key><false/>
+</dict></plist>
