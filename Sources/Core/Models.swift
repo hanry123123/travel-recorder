@@ -43,6 +43,9 @@ struct Trip: StoredModel, Identifiable {
     var title: String
     var features = ""
     var reflection = ""
+    var favoritedAt: Date?
+    var favoriteReason: String?
+    var isFavorite: Bool { favoritedAt != nil }
     var startedAt: Date
     var endedAt: Date?
     var status: TripStatus = .recording
@@ -84,6 +87,7 @@ struct TrackPoint: StoredModel, Identifiable {
 }
 
 struct PhotoAttachment: StoredModel, Identifiable {
+    var isPreview: Bool?
     static let kind = "photo"
     var id = UUID()
     var tripID: UUID

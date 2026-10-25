@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import PhotosUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct ImportedPhotoInput {
     var data: Data
@@ -12,14 +13,17 @@ struct ImportedPhotoInput {
 final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     var onChange: (() -> Void)?
     private var observing = false
+    private let observationQueue = DispatchQueue(label: "travel.photo.observation")
     var authorization: PHAuthorizationStatus { PHPhotoLibrary.authorizationStatus(for: .readWrite) }
     func request(_ completion: @escaping () -> Void) {
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { _ in DispatchQueue.main.async { self.observe(); completion() } }
     }
     func observe() {
-        guard !observing, authorization == .authorized || authorization == .limited else { return }
-        PHPhotoLibrary.shared().register(self)
-        observing = true
+        observationQueue.async { [weak self] in
+            guard let self = self, !self.observing, self.authorization == .authorized || self.authorization == .limited else { return }
+            PHPhotoLibrary.shared().register(self)
+            self.observing = true
+        }
     }
     deinit { if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self) } }
     func photoLibraryDidChange(_ changeInstance: PHChange) { DispatchQueue.main.async { self.onChange?() } }
@@ -39,18 +43,31 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
     }
     func read(_ asset: PHAsset, completion: @escaping (Result<ImportedPhotoInput, Error>) -> Void) {
+        let lock = NSLock()
+        var completed = false
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
         options.version = .current
         PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, info in
             if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+            lock.lock()
+            if completed { lock.unlock(); return }
+            completed = true; lock.unlock()
             if let data = data {
                 let location = asset.location.map { Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
                 completion(.success(ImportedPhotoInput(data: data, assetID: asset.localIdentifier, date: asset.creationDate, coordinate: location)))
             } else {
                 completion(.failure(info?[PHImageErrorKey] as? Error ?? TripError.storage("照片暂不可用，请联网后重试。")))
             }
+        }
+    }
+    func preview(_ asset: PHAsset, completion: @escaping (Data) -> Void) {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .fastFormat; options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        PHImageManager.default().requestImage(for: asset, targetSize: CGSize(width: 320, height: 320), contentMode: .aspectFit, options: options) { image, _ in
+            if let data = image?.jpegData(compressionQuality: 0.85) { completion(data) }
         }
     }
     func read(_ result: PHPickerResult, completion: @escaping (Result<ImportedPhotoInput, Error>) -> Void) {

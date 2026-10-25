@@ -1,6 +1,22 @@
 import SwiftUI
 
-/// Use a bitmap circle so the GPU never tessellates a clipped SwiftUI button edge.
+/// Draw the circle directly at the view's display scale, without a cached texture.
+final class MapControlButton: UIControl {
+    var symbol = "location.fill"
+    var darkAppearance = false
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        context.setFillColor((darkAppearance ? UIColor.black : UIColor.white).cgColor)
+        let inset = 1 / max(1, contentScaleFactor)
+        context.fillEllipse(in: bounds.insetBy(dx: inset, dy: inset))
+        let configuration = UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        if let icon = UIImage(systemName: symbol, withConfiguration: configuration)?.withTintColor(.systemBlue, renderingMode: .alwaysOriginal) {
+            let size = icon.size
+            icon.draw(in: CGRect(x: (bounds.width-size.width)/2, y: (bounds.height-size.height)/2, width: size.width, height: size.height))
+        }
+    }
+}
+
 struct MapCircleButton: View {
     let symbol: String
     let label: String
@@ -11,32 +27,29 @@ struct MapCircleButton: View {
 }
 
 private struct NativeMapButton: UIViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
     let symbol: String
     let label: String
     let action: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(action) }
-    func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .custom)
+    func makeUIView(context: Context) -> MapControlButton {
+        let button = MapControlButton(frame: .zero)
         button.backgroundColor = .clear
         button.isOpaque = false
         button.layer.borderWidth = 0; button.layer.shadowOpacity = 0
-        button.layer.shouldRasterize = true
-        button.layer.rasterizationScale = UIScreen.main.scale
-        button.adjustsImageWhenHighlighted = false
+        button.layer.shouldRasterize = false
+        button.layer.masksToBounds = false
+        button.contentMode = .redraw
+        button.isAccessibilityElement = true
+        button.accessibilityTraits = .button
         button.addTarget(context.coordinator, action: #selector(Coordinator.pressed), for: .touchUpInside)
         return button
     }
-    func updateUIView(_ button: UIButton, context: Context) {
+    func updateUIView(_ button: MapControlButton, context: Context) {
         context.coordinator.action = action
-        let background = UIColor.systemBackground.resolvedColor(with: button.traitCollection)
-        let image = UIGraphicsImageRenderer(size: CGSize(width: 44, height: 44)).image { renderer in
-            renderer.cgContext.setFillColor(background.cgColor)
-            renderer.cgContext.fillEllipse(in: CGRect(x: 0.5, y: 0.5, width: 43, height: 43))
-        }
-        button.setBackgroundImage(image, for: .normal)
-        button.setBackgroundImage(image, for: .highlighted)
-        button.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)), for: .normal)
-        button.tintColor = .systemBlue; button.accessibilityLabel = label
+        button.symbol = symbol; button.darkAppearance = colorScheme == .dark
+        button.accessibilityLabel = label
+        button.setNeedsDisplay()
     }
     final class Coordinator: NSObject {
         var action: () -> Void
@@ -54,12 +67,12 @@ struct ReplayControls: View {
             HStack(spacing: 14) {
                 Button(action: {
                     switch controller.state {
-                    case .idle, .finished: controller.start(points)
-                    case .playing: controller.pause()
+                    case .idle, .finished: controller.start(points, live: recording)
+                    case .playing, .live: controller.pause()
                     case .paused: controller.resume()
                     }
                 }) {
-                    Label(title, systemImage: controller.state == .playing ? "pause.fill" : "play.fill")
+                    Label(title, systemImage: controller.isRunning ? "pause.fill" : "play.fill")
                         .font(.subheadline).padding(.horizontal, 14).frame(height: 40)
                         .background(Capsule().fill(Color.blue.opacity(0.1)))
                 }.buttonStyle(PlainButtonStyle()).foregroundColor(.blue).disabled(points.isEmpty)
@@ -71,13 +84,26 @@ struct ReplayControls: View {
             }
             if controller.isPresenting {
                 ReplayProgressControl(controller: controller, progress: controller.progress)
+                HStack {
+                    Text(points.first?.timestamp ?? Date(), style: .time)
+                    Spacer()
+                    if recording { Text("最新") }
+                    Text(points.last?.timestamp ?? Date(), style: .time)
+                }.font(.caption2).foregroundColor(.secondary)
+                if !controller.followsHead {
+                    Button("跟随光点") { controller.followHead() }.font(.caption)
+                }
             }
+        }
+        .onChange(of: "\(points.count):\(points.last?.id.uuidString ?? ""):\(recording)") { _ in
+            controller.update(points, live: recording)
         }
     }
     private var title: String {
         switch controller.state {
         case .idle: return "路途重现"
         case .playing: return "暂停重现"
+        case .live: return "实时跟随 · 暂停"
         case .paused: return "继续重现"
         case .finished: return "再看一遍"
         }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// A frozen, chronological route. Never modifies the live recorder or its points.
+/// Chronological presentation geometry; never modifies recorder data.
 struct RouteReplayPath {
     let points: [TrackPoint]
     let connectsToPrevious: [Bool]
@@ -45,8 +45,7 @@ struct RouteReplayTimeline {
     private var steps: [Step] = []
     private(set) var duration: Double = 0
 
-    /// Distances are measured in screen points at the initial route overview.
-    /// A long winding route takes longer instead of accelerating arbitrarily.
+    /// Apply the duration bound to the whole timeline, including recording gaps.
     init(path: RouteReplayPath, screenDistances: [Double], pointsPerSecond: Double = 36) {
         guard !path.points.isEmpty else { return }
         precondition(screenDistances.count == max(0, path.points.count - 1))
@@ -72,6 +71,20 @@ struct RouteReplayTimeline {
             }
         }
         append(path.points.count-1, path.points.count-1, 1.2)
+        if path.points.count > 1 {
+            let bounded = min(60, max(20, duration))
+            let scale = bounded / duration
+            steps = steps.map { Step(start: $0.start*scale, end: $0.end*scale, from: $0.from, to: $0.to, visible: $0.visible) }
+            duration = bounded
+        }
+    }
+
+    /// Preserve the geographic cursor when an appended route changes its timing.
+    func time(for frame: RouteReplayFrame) -> Double {
+        if let step = steps.first(where: { $0.from == frame.from && $0.to == frame.to && $0.visible == frame.visible }) {
+            return step.start + (step.end-step.start)*frame.fraction
+        }
+        return 0
     }
 
     func frame(at elapsed: Double) -> RouteReplayFrame? {

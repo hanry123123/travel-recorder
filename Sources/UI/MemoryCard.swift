@@ -23,6 +23,7 @@ struct MemoryCard: View {
             HStack {
                 Text(trip.title).font(.headline).foregroundColor(.primary).lineLimit(1)
                 Spacer()
+                if trip.isFavorite { Image(systemName: "star.fill").foregroundColor(.orange) }
                 if trip.status != .ended { Text(TravelFormat.status(trip.status)).font(.caption).foregroundColor(.blue) }
             }
             Text(trip.startedAt, style: .date).font(.caption).foregroundColor(.secondary)
@@ -31,6 +32,7 @@ struct MemoryCard: View {
                 Spacer()
                 Label("\(photos.count) 张", systemImage: "photo")
             }.font(.caption).foregroundColor(.secondary)
+            if let reason = trip.favoriteReason, trip.isFavorite, !reason.isEmpty { Text("收藏理由：" + reason).font(.caption).foregroundColor(.secondary).lineLimit(2) }
             if !trip.features.isEmpty { Text(trip.features).font(.caption).foregroundColor(.blue).lineLimit(1) }
         }.padding(14).background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(16)
         .onAppear(perform: requestNames)

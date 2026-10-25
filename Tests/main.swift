@@ -199,14 +199,15 @@ let replayPath = RouteReplayPath(points: [r4, r1, r0, r3, r2])
 check(replayPath.points.map { $0.id } == [r0, r1, r2, r3, r4].map { $0.id }, "replay follows timestamps, including revisiting the same place")
 check(replayPath.connectsToPrevious == [false, true, true, false, true], "replay preserves the pause segment break")
 let replayTimeline = RouteReplayTimeline(path: replayPath, screenDistances: [180, 180, 100000, 180])
-check(abs(replayTimeline.duration-18.15) < 0.001, "moderate 36-point/sec speed excludes the unrecorded gap distance")
+let replayScale = replayTimeline.duration/18.15
+check(abs(replayTimeline.duration-20) < 0.001, "whole replay is bounded to twenty seconds including gaps")
 check(replayTimeline.frame(at: 0)?.from == 0, "replay starts at the first recorded point")
-let outbound = replayTimeline.frame(at: 3.3)!
+let outbound = replayTimeline.frame(at: 3.3*replayScale)!
 check(outbound.from == 0 && outbound.to == 1 && abs(outbound.fraction-0.5) < 0.001, "outbound leg advances smoothly to its midpoint")
-let inbound = replayTimeline.frame(at: 8.3)!
+let inbound = replayTimeline.frame(at: 8.3*replayScale)!
 check(inbound.from == 1 && inbound.to == 2 && abs(inbound.fraction-0.5) < 0.001, "return leg retains its original travel order")
-check(replayTimeline.frame(at: 11.0)?.visible == false, "light disappears at a pause instead of flying over the gap")
-check(replayTimeline.frame(at: 11.6)?.from == 3, "next segment restarts at its own first recorded position")
+check(replayTimeline.frame(at: 11.0*replayScale)?.visible == false, "light disappears at a pause instead of flying over the gap")
+check(replayTimeline.frame(at: 11.6*replayScale)?.from == 3, "next segment restarts at its own first recorded position")
 let finalFrame = replayTimeline.frame(at: replayTimeline.duration+100)!
 check(finalFrame.from == 4 && finalFrame.to == 4, "playback clamps to the actual last point")
 check(replayTimeline.frame(at: -10)?.from == 0, "negative replay time is safely clamped")
@@ -217,9 +218,9 @@ check(emptyTimeline.duration == 0 && emptyTimeline.frame(at: 0) == nil, "empty j
 let singleTimeline = RouteReplayTimeline(path: RouteReplayPath(points: [r0]), screenDistances: [])
 check(singleTimeline.duration == 2 && singleTimeline.frame(at: 1)?.from == 0, "one point is shown briefly without inventing motion")
 let shortTimeline = RouteReplayTimeline(path: RouteReplayPath(points: [r0,r1]), screenDistances: [3])
-check(shortTimeline.duration == 14, "very short journeys are not replayed in a blink")
+check(shortTimeline.duration == 20, "very short journeys are not replayed in a blink")
 let longTimeline = RouteReplayTimeline(path: RouteReplayPath(points: [r0,r1]), screenDistances: [7200])
-check(longTimeline.duration == 202, "long winding journeys take longer instead of becoming too fast")
+check(longTimeline.duration == 60, "long winding journeys stop at sixty seconds")
 var badReplayPoint = r1; badReplayPoint.coordinate.latitude = .nan
 let invalidPath = RouteReplayPath(points: [r0, badReplayPoint, r2])
 check(invalidPath.points.count == 2 && !invalidPath.connectsToPrevious[1], "invalid intermediate GPS point cannot create a replay bridge")
@@ -283,9 +284,9 @@ check(ReplaySparks.frame(at: .nan, locate: sparkLocation).isEmpty, "invalid part
 check(ReplaySparks.frame(at: -1, locate: sparkLocation).isEmpty, "restart cannot display particles from negative time")
 check(ReplaySparks.frame(at: 100000, locate: sparkLocation).count <= 51, "long playback does not accumulate particles")
 // Scrubbing uses the same replay frame for the displayed capture time and map position.
-check(abs(replayTimeline.recordedTime(at: 3.3, path: replayPath)!.timeIntervalSince(base)-5) < 0.001, "outbound map midpoint displays the corresponding capture time")
-check(abs(replayTimeline.recordedTime(at: 8.3, path: replayPath)!.timeIntervalSince(base)-15) < 0.001, "revisited coordinates retain their later capture time")
-let gapSeekTime = replayTimeline.scrubTime(fraction: 11.0/replayTimeline.duration)
+check(abs(replayTimeline.recordedTime(at: 3.3*replayScale, path: replayPath)!.timeIntervalSince(base)-5) < 0.001, "outbound map midpoint displays the corresponding capture time")
+check(abs(replayTimeline.recordedTime(at: 8.3*replayScale, path: replayPath)!.timeIntervalSince(base)-15) < 0.001, "revisited coordinates retain their later capture time")
+let gapSeekTime = replayTimeline.scrubTime(fraction: 11.0*replayScale/replayTimeline.duration)
 check(replayTimeline.frame(at: gapSeekTime)!.visible, "scrubbing into a recording gap snaps to a visible recorded position")
 check(replayTimeline.scrubTime(fraction: -1) == 0 && replayTimeline.scrubTime(fraction: 2) == replayTimeline.duration, "scrub endpoints clamp safely")
 check(replayTimeline.scrubTime(fraction: .nan) == 0, "invalid scrub value is safe")
@@ -293,8 +294,8 @@ replayController.start(replayPath.points)
 replayController.configure(screenDistances: [180,180,100000,180])
 replayController.beginScrubbing()
 check(replayController.state == .paused && replayController.isScrubbing, "touching progress pauses playback")
-replayController.seek(to: 3.3/replayTimeline.duration)
-check(abs(replayController.elapsed-3.3) < 0.001 && abs(replayController.progress.position.recordedAt!.timeIntervalSince(base)-5) < 0.001, "seek updates map clock and progress time together")
+replayController.seek(to: 3.3*replayScale/replayTimeline.duration)
+check(abs(replayController.elapsed-3.3*replayScale) < 0.001 && abs(replayController.progress.position.recordedAt!.timeIntervalSince(base)-5) < 0.001, "seek updates map clock and progress time together")
 let scrubbedTime = replayController.elapsed
 replayController.advance(by: 0.1)
 check(replayController.elapsed == scrubbedTime, "display ticks cannot fight a held slider")
@@ -350,6 +351,69 @@ repo = nil; repo = try CoreDataRepository(url: database)
 check(try repo!.load(Trip.self).map { $0.id } == [other.id], "deleted memory stays deleted after repository reopen")
 check(try repo!.load(PhotoAttachment.self, tripID: trip.id).isEmpty && repo!.load(DiaryEntry.self, tripID: trip.id).isEmpty, "deleted memory photo and diary records remain removed")
 check(FileManager.default.fileExists(atPath: files.url(imported.imageFile).path), "repository deletion does not operate on arbitrary image files")
+// Live replay must preserve its geographic cursor while its endpoint grows.
+let movingReplay = RouteReplayController()
+movingReplay.start([r0,r1], live: true)
+for _ in 0..<50 { movingReplay.advance(by: 0.1) }
+let beforeAppendTime = movingReplay.progress.position.recordedAt!
+let movingRun = movingReplay.runID
+movingReplay.update([r0,r1,r2], live: true)
+check(movingReplay.runID == movingRun && movingReplay.path.points.count == 3, "live append updates the same run")
+check(abs(movingReplay.progress.position.recordedAt!.timeIntervalSince(beforeAppendTime)) < 0.001, "live append preserves geographic and recorded-time cursor")
+for _ in 0..<551 { movingReplay.advance(by: 0.1) }
+check(movingReplay.state == .live && movingReplay.progress.position.recordedAt == r2.timestamp, "bounded history catches latest point and enters live mode")
+movingReplay.update([r0,r1,r2,r3,r4], live: true)
+for _ in 0..<20 { movingReplay.advance(by: 0.1) }
+check(movingReplay.progress.position.recordedAt == r4.timestamp, "live mode follows later appended points across a pause")
+movingReplay.userMovedMap()
+check(!movingReplay.followsHead && movingReplay.state == .live, "manual camera movement does not stop replay")
+movingReplay.followHead()
+check(movingReplay.followsHead, "explicit follow head restores camera tracking")
+movingReplay.beginScrubbing(); movingReplay.seek(to: 0.3)
+let heldTime = movingReplay.progress.position.recordedAt
+let r5 = replayPoint(110, 121.03, segmentB)
+movingReplay.update([r0,r1,r2,r3,r4,r5], live: true)
+check(movingReplay.path.points.count == 5 && movingReplay.progress.position.recordedAt == heldTime, "slider drag freezes bounds while new fixes wait")
+movingReplay.endScrubbing()
+check(movingReplay.path.points.count == 6 && movingReplay.state == .playing, "releasing live scrub consumes queued points and replays history")
+for _ in 0..<601 { movingReplay.advance(by: 0.1) }
+check(movingReplay.state == .live && movingReplay.progress.position.recordedAt == r5.timestamp, "scrubbed live history catches up again")
+movingReplay.update([r0,r1,r2,r3,r4,r5], live: false)
+for _ in 0..<21 { movingReplay.advance(by: 0.1) }
+check(movingReplay.state == .finished, "ending trip ends live follow cleanly")
+var favoriteTrip = Trip(now: base)
+let legacyTripData = try JSONEncoder().encode(favoriteTrip)
+check(try JSONDecoder().decode(Trip.self, from: legacyTripData).favoritedAt == nil, "old trip without favorite keys remains decodable")
+favoriteTrip.favoritedAt = base; favoriteTrip.favoriteReason = ""; favoriteTrip.features = "original features"
+try repo!.save(favoriteTrip)
+let favoriteReload = try repo!.load(Trip.self).first { $0.id == favoriteTrip.id }!
+check(favoriteReload.isFavorite && favoriteReload.favoriteReason == "", "empty favorite reason persists")
+check(favoriteReload.features == "original features", "favorite metadata preserves features")
+var laterPhoto = attachment; laterPhoto.capturedAt = base.addingTimeInterval(15); laterPhoto.captureDateKnown = true
+let photoFrame = ShareSelection.frame(for: laterPhoto, in: replayPath)
+check(photoFrame?.from == 1 && photoFrame?.to == 2, "share photo matches return leg by time rather than repeated coordinates")
+laterPhoto.capturedAt = base.addingTimeInterval(30)
+check(ShareSelection.frame(for: laterPhoto, in: replayPath) == nil, "share photo in unrecorded gap does not invent a position")
+laterPhoto.captureDateKnown = false
+check(ShareSelection.frame(for: laterPhoto, in: replayPath) == nil, "unknown photo date is not guessed onto a route")
+check(ShareSelection.representative([coverA,coverB,coverC,coverD]).count == 3, "share selects at most three representative photos by default")
+let previewCopy = try files.prepare(data: Data(contentsOf: files.url(imported.imageFile)), preview: true)
+check(previewCopy.thumbnailFile.hasPrefix("preview-"), "transient photo files are explicitly identifiable")
+_ = try PhotoFileStore(directory: files.directory)
+check(!FileManager.default.fileExists(atPath: files.url(previewCopy.thumbnailFile).path), "next launch removes abandoned previews")
+check(FileManager.default.fileExists(atPath: files.url(imported.imageFile).path), "preview cleanup preserves original independent photo copies")
+// An append stream must not extend a single history replay beyond its initial budget.
+let streamingReplay = RouteReplayController()
+var streamingPoints = [r0,r1]
+streamingReplay.start(streamingPoints, live: true)
+for tick in 0..<600 {
+    if tick % 10 == 0 {
+        streamingPoints.append(replayPoint(11+Double(tick), 121.001+Double(tick)*0.00001, segmentA))
+        streamingReplay.update(streamingPoints, live: true)
+    }
+    streamingReplay.advance(by: 0.1)
+}
+check(streamingReplay.state == .live, "continuously growing history still enters live mode within sixty active seconds")
 let report: [String: Any] = ["status":"PASS", "checks":checks, "tested":"production core logic, SQLite persistence, ImageIO import", "ios14_device_tested":false]
 try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: root.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("report.json"))
 print("FIXTURES PASS: \(checks) checks; device behavior still pending")

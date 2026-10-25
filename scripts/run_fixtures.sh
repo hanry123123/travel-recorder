@@ -9,6 +9,9 @@ if [ -d /Applications/Xcode.app/Contents/Developer ]; then
 else
     fixture_swift=$(xcrun --find swiftc)
     fixture_sdk=$(xcrun --show-sdk-path)
+    if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk ]; then
+        fixture_sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX11.1.sdk
+    fi
 fi
 mkdir -p artifacts/fixtures/tmp
 export TMPDIR="$PWD/artifacts/fixtures/tmp"

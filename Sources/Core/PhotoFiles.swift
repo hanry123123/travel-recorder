@@ -14,17 +14,20 @@ final class PhotoFileStore {
     init(directory: URL) throws {
         self.directory = directory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where file.lastPathComponent.hasPrefix("preview-") {
+            try? FileManager.default.removeItem(at: file)
+        }
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: directory.path)
         #endif
     }
     func url(_ name: String) -> URL { directory.appendingPathComponent(URL(fileURLWithPath: name).lastPathComponent) }
-    func prepare(data: Data) throws -> PreparedPhoto {
+    func prepare(data: Data, preview: Bool = false) throws -> PreparedPhoto {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw TripError.storage("无法读取这张照片") }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] ?? [:]
         let image = try resized(source, edge: 2560)
         let thumbnail = try resized(source, edge: 320)
-        let key = UUID().uuidString
+        let key = (preview ? "preview-" : "") + UUID().uuidString
         let fullName = key + ".jpg"
         let thumbName = key + "-thumb.jpg"
         do {
@@ -56,6 +59,12 @@ final class PhotoFileStore {
         return data as Data
     }
     func remove(_ file: String) { try? FileManager.default.removeItem(at: url(file)) }
+    static func isShareImage(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] else { return false }
+        return tiff[kCGImagePropertyTIFFSoftware as String] as? String == "TravelRecorder Share"
+    }
     static func coordinate(in properties: [String: Any]) -> Coordinate? {
         guard let gps = properties[kCGImagePropertyGPSDictionary as String] as? [String: Any],
               let latitude = gps[kCGImagePropertyGPSLatitude as String] as? Double,

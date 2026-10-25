@@ -1,0 +1,47 @@
+package com.aluba.travelrecorder;
+import android.graphics.*;
+import android.media.*;
+import java.io.*;
+import java.nio.*;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntConsumer;
+
+final class ShareExporter {
+ static final int W=640,H=960,FPS=24;
+ static File export(TravelApplication app,Models.Trip trip,List<RouteMath.Point> points,List<Models.Photo> photos,String text,boolean video,AtomicBoolean cancel,IntConsumer progress)throws Exception{
+  File folder=new File(app.getCacheDir(),"shares");folder.mkdirs();File[] old=folder.listFiles();if(old!=null)for(File f:old)if(System.currentTimeMillis()-f.lastModified()>86400000)f.delete();
+  File file=new File(folder,"TravelRecorder-"+UUID.randomUUID()+(video?".mp4":".jpg"));Drawing d=new Drawing(app,trip,points,photos,text);
+  try{if(cancel.get())throw new IOException("已取消");if(video)movie(file,d,cancel,progress);else{if(d.posterHeight()>12000)throw new IOException("分享文字过长，请缩短或分段分享");Bitmap b=Bitmap.createBitmap(W,d.posterHeight(),Bitmap.Config.ARGB_8888);d.draw(new Canvas(b),-1);Photos.write(b,file);b.recycle();ExifInterface exif=new ExifInterface(file.getPath());exif.setAttribute(ExifInterface.TAG_SOFTWARE,"TravelRecorder Share");exif.saveAttributes();}if(cancel.get())throw new IOException("已取消");return file;}catch(Exception e){file.delete();throw e;}finally{d.close();}
+ }
+ static final class Drawing {
+  final Models.Trip trip;final List<RouteMath.Point> points;final List<Models.Photo> photos;final Map<String,Bitmap> images=new HashMap<>();final String text;final Paint p=new Paint(3);double minX,minY,scale,offX,offY,anchor;final int duration;
+  Drawing(TravelApplication app,Models.Trip t,List<RouteMath.Point> route,List<Models.Photo> pictures,String writing)throws IOException{trip=t;points=new ArrayList<>(route);photos=new ArrayList<>(pictures);text=writing;duration=(int)Math.min(60,Math.max(20,RouteMath.durationMillis(points)/1000));for(Models.Photo photo:photos){BitmapFactory.Options o=new BitmapFactory.Options();o.inSampleSize=2;Bitmap b=BitmapFactory.decodeFile(new File(app.getFilesDir(),photo.file).getPath(),o);if(b==null){close();throw new IOException("选中的照片读取失败");}images.put(photo.id,b);}anchor=points.isEmpty()?0:RouteMath.x(points.get(0).lon);minX=1e9;minY=1;double maxX=-1e9,maxY=0;for(RouteMath.Point q:points){double x=anchor+RouteMath.delta(RouteMath.x(q.lon)-anchor),y=RouteMath.y(q.lat);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);}if(points.isEmpty()){minX=0;minY=0;maxX=1;maxY=1;}scale=Math.min(530/Math.max(0.00001,maxX-minX),440/Math.max(0.00001,maxY-minY));offX=55+(530-(maxX-minX)*scale)/2;offY=160+(440-(maxY-minY)*scale)/2;}
+  float x(double lon){return (float)(offX+(anchor+RouteMath.delta(RouteMath.x(lon)-anchor)-minX)*scale);}
+  float y(double lat){return (float)(offY+(RouteMath.y(lat)-minY)*scale);}
+  int posterHeight(){return Math.max(H,880+lines(text,550,19).size()*26);}
+  List<String> lines(String s,float width,int size){p.setTextSize(size);List<String> list=new ArrayList<>();for(String paragraph:s.split("\n",-1)){if(paragraph.isEmpty()){list.add("");continue;}int pos=0;while(pos<paragraph.length()){int n=p.breakText(paragraph,pos,paragraph.length(),true,width,null);n=Math.max(1,n);list.add(paragraph.substring(pos,pos+n));pos+=n;}}return list;}
+  void label(Canvas c,String s,float x,float y,int size,boolean bold){p.setStyle(Paint.Style.FILL);p.setColor(0xFF292D32);p.setTextSize(size);p.setTypeface(bold?Typeface.DEFAULT_BOLD:Typeface.DEFAULT);c.drawText(s,x,y,p);}
+  void draw(Canvas c,double fraction){c.drawColor(0xFFF8F7F0);List<String> title=lines(trip.title,560,28);for(int i=0;i<Math.min(2,title.size());i++)label(c,title.get(i),30,43+i*33,28,true);label(c,new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",Locale.CHINA).format(new Date(trip.start))+" · "+MainActivity.distance(trip.distance),30,115,18,false);
+   p.setColor(0xFFEAEDE8);c.drawRoundRect(24,135,W-24,630,16,16,p);Path path=new Path();RouteMath.Point prev=null;for(RouteMath.Point q:points){if(prev==null||q.segment!=prev.segment)path.moveTo(x(q.lon),y(q.lat));else path.lineTo(x(q.lon),y(q.lat));prev=q;}p.setColor(0xFF167DFF);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setStrokeCap(Paint.Cap.ROUND);p.setStrokeJoin(Paint.Join.ROUND);c.drawPath(path,p);p.setStyle(Paint.Style.FILL);
+   if(fraction>=0){long time=RouteMath.timeAtFraction(points,fraction);RouteMath.Point head=RouteMath.at(points,time);if(head!=null)MapCanvas.drawSparks(c,x(head.lon),y(head.lat),(long)(fraction*duration*1000),1,p);label(c,new java.text.SimpleDateFormat("HH:mm:ss",Locale.CHINA).format(new Date(time))+(head==null?" · 暂停":""),34,615,16,false);}
+   if(!photos.isEmpty()){int start=fraction<0?0:Math.min(photos.size()-1,(int)(fraction*photos.size()));int count=fraction<0?Math.min(3,photos.size()):1;for(int i=0;i<count;i++){Models.Photo photo=photos.get(fraction<0?i:start);RectF frame=count==1?new RectF(24,646,616,806):new RectF(24+i*200,646,214+i*200,806);MapCanvas.drawPhoto(c,images.get(photo.id),frame,p);}}
+   List<String> body=lines(text,570,19);int max=fraction<0?body.size():Math.min(3,body.size());for(int i=0;i<max;i++)label(c,body.get(i),30,840+i*26,19,false);if(fraction>=0&&body.size()>3)label(c,"…",30,918,19,false);label(c,"旅迹 · 路线与回忆",30,c.getHeight()-15,13,false);
+  }
+  void close(){for(Bitmap b:images.values())b.recycle();images.clear();}
+ }
+ static void movie(File file,Drawing drawing,AtomicBoolean cancel,IntConsumer progress)throws Exception{
+  MediaCodec codec=null;MediaMuxer muxer=null;boolean started=false,muxStarted=false;Bitmap bitmap=null;
+  try{
+   String name=null;int color=0;for(MediaCodecInfo info:new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()){if(!info.isEncoder())continue;for(String type:info.getSupportedTypes())if(type.equalsIgnoreCase("video/avc")){for(int f:info.getCapabilitiesForType(type).colorFormats)if(f==MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar||f==MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar){name=info.getName();color=f;break;}}if(name!=null)break;}
+   if(name==null)throw new IOException("此设备没有兼容的视频编码器，可分享图片");codec=MediaCodec.createByCodecName(name);MediaFormat format=MediaFormat.createVideoFormat("video/avc",W,H);format.setInteger(MediaFormat.KEY_COLOR_FORMAT,color);format.setInteger(MediaFormat.KEY_BIT_RATE,2500000);format.setInteger(MediaFormat.KEY_FRAME_RATE,FPS);format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,1);codec.configure(format,null,null,MediaCodec.CONFIGURE_FLAG_ENCODE);codec.start();started=true;muxer=new MediaMuxer(file.getPath(),MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+   bitmap=Bitmap.createBitmap(W,H,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(bitmap);int[] pixels=new int[W*H];byte[] yuv=new byte[W*H*3/2];int frames=drawing.duration*FPS,index=0,track=-1;boolean eos=false,done=false;MediaCodec.BufferInfo info=new MediaCodec.BufferInfo();long lastProgress=System.currentTimeMillis();
+   while(!done){if(cancel.get())throw new IOException("已取消");boolean moved=false;
+    if(!eos){int input=codec.dequeueInputBuffer(10000);if(input>=0){ByteBuffer buffer=codec.getInputBuffer(input);if(index<frames){drawing.draw(canvas,index/(double)(frames-1));bitmap.getPixels(pixels,0,W,0,0,W,H);toYuv(pixels,yuv,W,H,color==MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);if(buffer==null||buffer.capacity()<yuv.length)throw new IOException("视频编码缓冲区不足");buffer.clear();buffer.put(yuv);codec.queueInputBuffer(input,0,yuv.length,index*1000000L/FPS,0);index++;if(index%FPS==0)progress.accept(index*100/frames);}else{codec.queueInputBuffer(input,0,0,index*1000000L/FPS,MediaCodec.BUFFER_FLAG_END_OF_STREAM);eos=true;}moved=true;}}
+    int output;while((output=codec.dequeueOutputBuffer(info,10000))>=0){moved=true;ByteBuffer encoded=codec.getOutputBuffer(output);if((info.flags&MediaCodec.BUFFER_FLAG_CODEC_CONFIG)==0&&info.size>0){if(!muxStarted||encoded==null)throw new IOException("编码器没有提供视频格式");encoded.position(info.offset);encoded.limit(info.offset+info.size);muxer.writeSampleData(track,encoded,info);}done=(info.flags&MediaCodec.BUFFER_FLAG_END_OF_STREAM)!=0;codec.releaseOutputBuffer(output,false);if(done)break;}if(output==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED){if(muxStarted)throw new IOException("编码格式重复改变");track=muxer.addTrack(codec.getOutputFormat());muxer.start();muxStarted=true;moved=true;}if(moved)lastProgress=System.currentTimeMillis();else if(System.currentTimeMillis()-lastProgress>15000)throw new IOException("视频编码超时");
+   }
+   if(!muxStarted)throw new IOException("视频没有生成");muxer.stop();muxStarted=false;
+  }finally{if(bitmap!=null)bitmap.recycle();if(codec!=null){if(started)try{codec.stop();}catch(Exception ignored){}codec.release();}if(muxer!=null){if(muxStarted)try{muxer.stop();}catch(Exception ignored){}muxer.release();}}
+ }
+ static void toYuv(int[] argb,byte[] yuv,int width,int height,boolean semi){int area=width*height,u=area,v=semi?area+1:area+area/4;for(int y=0;y<height;y++)for(int x=0;x<width;x++){int c=argb[y*width+x],r=(c>>16)&255,g=(c>>8)&255,b=c&255;int yy=((66*r+129*g+25*b+128)>>8)+16;yuv[y*width+x]=(byte)Math.max(0,Math.min(255,yy));if((y&1)==0&&(x&1)==0){int uu=((-38*r-74*g+112*b+128)>>8)+128,vv=((112*r-94*g-18*b+128)>>8)+128;yuv[u]=(byte)Math.max(0,Math.min(255,uu));yuv[v]=(byte)Math.max(0,Math.min(255,vv));u+=semi?2:1;v+=semi?2:1;}}}
+}

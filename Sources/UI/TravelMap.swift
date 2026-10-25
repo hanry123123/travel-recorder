@@ -38,6 +38,7 @@ struct TravelMap: UIViewRepresentable {
     var onCoordinate: (Coordinate) -> Void = { _ in }
     var onPhoto: (UUID) -> Void = { _ in }
     var onDiary: (UUID) -> Void = { _ in }
+    var onPhotos: ([UUID]) -> Void = { _ in }
     var onUserInteraction: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -105,7 +106,7 @@ struct TravelMap: UIViewRepresentable {
                 map.addOverlay(MKPolyline(coordinates: coordinates, count: coordinates.count))
             }
             if coordinator.followState.shouldFollow(enabled: follow, replaying: replay?.isPresenting == true), let last = points.last {
-                map.setRegion(MKCoordinateRegion(center: displayed(last.coordinate), latitudinalMeters: 1400, longitudinalMeters: 1400), animated: true)
+                coordinator.replayAnimator.followLocation(displayed(last.coordinate), on: map)
             }
         }
         let photoSignature = (photoDirectory?.path ?? "") + photos.map { "\($0.id):\($0.thumbnailFile):\(String(describing: $0.coordinate))" }.joined(separator: "|")
@@ -113,10 +114,7 @@ struct TravelMap: UIViewRepresentable {
         let pinSignature = [photoSignature, diarySignature, String(describing: selection)].joined(separator: ":")
         if pinSignature != coordinator.pinSignature {
             coordinator.pinSignature = pinSignature
-            map.removeAnnotations(map.annotations.filter {
-                guard let pin = $0 as? TravelAnnotation else { return false }
-                return pin.kind != "start" && pin.kind != "end"
-            })
+            let oldPins = map.annotations.compactMap { $0 as? TravelAnnotation }.filter { $0.kind != "start" && $0.kind != "end" }
             var annotations: [TravelAnnotation] = []
             for photo in photos {
                 if let coordinate = photo.mapCoordinate {
@@ -129,7 +127,19 @@ struct TravelMap: UIViewRepresentable {
                 if let coordinate = diary.mapCoordinate { annotations.append(TravelAnnotation(id: diary.id, kind: "diary", coordinate: displayed(coordinate), title: diary.title.isEmpty ? "地点日记" : diary.title)) }
             }
             if let coordinate = selection { annotations.append(TravelAnnotation(id: UUID(), kind: "selection", coordinate: displayed(coordinate), title: "选中的位置")) }
-            map.addAnnotations(annotations)
+            let wanted = Set(annotations.map { $0.identifier })
+            map.removeAnnotations(oldPins.filter { !wanted.contains($0.identifier) })
+            let byID = Dictionary(uniqueKeysWithValues: oldPins.map { ($0.identifier, $0) })
+            for pin in annotations {
+                if let existing = byID[pin.identifier], existing.kind == pin.kind {
+                    if existing.coordinate.latitude != pin.coordinate.latitude || existing.coordinate.longitude != pin.coordinate.longitude { existing.coordinate = pin.coordinate }
+                    existing.title = pin.title
+                    if existing.thumbnailURL != pin.thumbnailURL {
+                        existing.thumbnailURL = pin.thumbnailURL
+                        (map.view(for: existing) as? PhotoMapMarker)?.load(pin.thumbnailURL)
+                    }
+                } else { map.addAnnotation(pin) }
+            }
         }
         coordinator.updateEndpoint(on: map, point: points.first, kind: "start")
         coordinator.updateEndpoint(on: map, point: points.count > 1 ? points.last : nil, kind: "end")
@@ -140,9 +150,11 @@ struct TravelMap: UIViewRepresentable {
             var coordinates = points.map { $0.coordinate } + photos.compactMap { $0.mapCoordinate } + diaries.filter { $0.photoID == nil }.compactMap { $0.mapCoordinate }
             if let selection = selection { coordinates.append(selection) }
             if coordinates.isEmpty, let fallback = fallback { coordinates.append(fallback) }
+            coordinator.replayAnimator.stopCamera()
             coordinator.fit(map, coordinates: coordinates)
         }
         if recenter, let coordinate = fallback ?? points.last?.coordinate {
+            coordinator.replayAnimator.stopCamera()
             coordinator.hasFitted = true
             map.setRegion(MKCoordinateRegion(center: displayed(coordinate), latitudinalMeters: 1400, longitudinalMeters: 1400), animated: true)
         }
@@ -162,7 +174,7 @@ struct TravelMap: UIViewRepresentable {
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) { replayAnimator.render() }
         @objc func manuallyMoved(_ gesture: UIGestureRecognizer) {
             guard gesture.state == .began else { return }
-            followState.userMoved()
+            replayAnimator.stopCamera(); followState.userMoved(); parent.replay?.userMovedMap()
             parent.onUserInteraction()
         }
         func mapView(_ mapView: MKMapView, regionWillChangeAnimated animated: Bool) {
@@ -174,7 +186,7 @@ struct TravelMap: UIViewRepresentable {
                 }) { return true }
                 return view.subviews.contains { hasZoomTap($0) }
             }
-            if hasZoomTap(mapView) { followState.userMoved(); parent.onUserInteraction() }
+            if hasZoomTap(mapView) { replayAnimator.stopCamera(); followState.userMoved(); parent.replay?.userMovedMap(); parent.onUserInteraction() }
         }
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             gestureRecognizer is UIPanGestureRecognizer || gestureRecognizer is UIPinchGestureRecognizer
@@ -216,10 +228,17 @@ struct TravelMap: UIViewRepresentable {
             return renderer
         }
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let cluster = annotation as? MKClusterAnnotation {
+                let members = cluster.memberAnnotations.compactMap { $0 as? TravelAnnotation }
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: "photoCluster") as? PhotoMapMarker ?? PhotoMapMarker(annotation: cluster, reuseIdentifier: "photoCluster")
+                view.annotation = cluster; view.clusteringIdentifier = nil
+                view.load(members.first?.thumbnailURL); view.setCount(members.count)
+                return view
+            }
             guard let pin = annotation as? TravelAnnotation else { return nil }
             if pin.kind == "photo" {
                 let view = mapView.dequeueReusableAnnotationView(withIdentifier: "photoThumbnail") as? PhotoMapMarker ?? PhotoMapMarker(annotation: pin, reuseIdentifier: "photoThumbnail")
-                view.annotation = pin; view.load(pin.thumbnailURL)
+                view.annotation = pin; view.clusteringIdentifier = "tripPhotos"; view.setCount(1); view.load(pin.thumbnailURL)
                 return view
             }
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: "marker") as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(annotation: pin, reuseIdentifier: "marker")
@@ -233,6 +252,10 @@ struct TravelMap: UIViewRepresentable {
             return view
         }
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let cluster = view.annotation as? MKClusterAnnotation {
+                parent.onPhotos(cluster.memberAnnotations.compactMap { ($0 as? TravelAnnotation)?.identifier })
+                mapView.deselectAnnotation(cluster, animated: false); return
+            }
             guard let annotation = view.annotation as? TravelAnnotation else { return }
             if annotation.kind == "photo" { parent.onPhoto(annotation.identifier); mapView.deselectAnnotation(annotation, animated: false) }
             if annotation.kind == "diary" { parent.onDiary(annotation.identifier); mapView.deselectAnnotation(annotation, animated: false) }

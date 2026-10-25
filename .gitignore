@@ -7,6 +7,12 @@ xcuserdata/
 __pycache__/
 *.py[cod]
 *.ipa
+*.apk
 *.dSYM/
 .env
 .env.*
+android/build/
+*.keystore
+*.jks
+*.p12
+*.mobileprovision

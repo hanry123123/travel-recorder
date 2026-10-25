@@ -4,6 +4,7 @@ import PhotosUI
 // A single sheet per presenter also supports the original iOS 14.0 SwiftUI runtime.
 enum TravelSheet: Identifiable {
     case diary(DiaryEntry), photo(PhotoAttachment), placement(PhotoAttachment), trip(Trip), picker(UUID)
+    case favorite(Trip), share(TripShareSnapshot), photoGroup([PhotoAttachment])
     var id: String {
         switch self {
         case .diary(let value): return "diary:" + value.id.uuidString
@@ -11,6 +12,9 @@ enum TravelSheet: Identifiable {
         case .placement(let value): return "placement:" + value.id.uuidString
         case .trip(let value): return "trip:" + value.id.uuidString
         case .picker(let value): return "picker:" + value.uuidString
+        case .favorite(let value): return "favorite:" + value.id.uuidString
+        case .share(let value): return "share:" + value.id.uuidString
+        case .photoGroup(let values): return "group:" + values.map { $0.id.uuidString }.joined()
         }
     }
 }
@@ -25,6 +29,9 @@ struct TravelSheetContent: View {
         case .placement(let photo): PlacementView(photo: photo)
         case .trip(let trip): TripEditor(trip: trip)
         case .picker(let tripID): PhotoPicker { results in onPickerFinished(); store.importPhotos(results, into: tripID) }
+        case .favorite(let trip): FavoriteEditor(trip: trip)
+        case .share(let snapshot): TripShareScreen(snapshot: snapshot)
+        case .photoGroup(let values): PhotoGroupScreen(photos: values)
         }
     }
 }
@@ -160,14 +167,18 @@ struct PhotoDetail: View {
                 VStack(alignment: .leading, spacing: 20) {
                     LocalPhoto(file: store.files.url(photo.imageFile), full: true).frame(maxWidth: .infinity).frame(height: 320).background(Color(UIColor.secondarySystemBackground)).clipped()
                     VStack(alignment: .leading, spacing: 18) {
+                        if photo.isPreview == true {
+                            Text("预览已就绪，完整照片仍在准备。").foregroundColor(.secondary)
+                            Button("重新读取照片") { if let trip = store.trip(photo.tripID) { store.scanPhotos(for: trip, force: true) } }
+                        }
                         if photo.captureDateKnown { Text(photo.capturedAt, style: .date).font(.headline) }
                         else { Text("拍摄日期未知").font(.headline) }
                         Button(action: { sheet = .placement(photo) }) { Label(photo.coordinate == nil ? "还没有位置 · 放到地图上" : "查看或修改照片位置", systemImage: "mappin.and.ellipse") }
-                        Button(action: { sheet = .diary(store.diaries(photo.tripID).first { $0.photoID == photo.id } ?? DiaryEntry(tripID: photo.tripID, photoID: photo.id, coordinate: photo.coordinate, createdAt: Date(), updatedAt: Date())) }) { Label("写照片日记", systemImage: "square.and.pencil") }
+                        Button(action: { sheet = .diary(store.diaries(photo.tripID).first { $0.photoID == photo.id } ?? DiaryEntry(tripID: photo.tripID, photoID: photo.id, coordinate: photo.coordinate, createdAt: Date(), updatedAt: Date())) }) { Label("写照片日记", systemImage: "square.and.pencil") }.disabled(photo.isPreview == true)
                         ForEach(store.diaries(photo.tripID).filter { $0.photoID == photo.id }) { entry in
                             Button(action: { sheet = .diary(entry) }) { VStack(alignment: .leading, spacing: 8) { Text(entry.title.isEmpty ? "照片日记" : entry.title).font(.headline); Text(entry.text).foregroundColor(.primary).multilineTextAlignment(.leading) } }
                         }
-                        Text("照片副本已保存在旅迹中，系统相册原图删除后仍可查看。").font(.caption).foregroundColor(.secondary)
+                        Text(photo.isPreview == true ? "完整照片保存成功后，可编辑照片位置与日记。" : "照片副本已保存在旅迹中，系统相册原图删除后仍可查看。").font(.caption).foregroundColor(.secondary)
                         Button("从旅程移除照片") { deleting = true }.foregroundColor(.red)
                     }.padding(.horizontal)
                 }.padding(.bottom)
@@ -186,6 +197,8 @@ struct LocalPhoto: View {
     let file: URL
     var full = false
     @State private var image: UIImage?
+    @State private var request = UUID()
+    @State private var loadedPath: String?
     private static let cache = NSCache<NSString, UIImage>()
     var body: some View {
         Group {
@@ -193,14 +206,17 @@ struct LocalPhoto: View {
                 if full { Image(uiImage: image).resizable().scaledToFit() }
                 else { Image(uiImage: image).resizable().scaledToFill() }
             } else { ZStack { Color(UIColor.secondarySystemBackground); Image(systemName: "photo").foregroundColor(.secondary) } }
-        }.onAppear(perform: load)
+        }.onAppear(perform: load).onChange(of: file) { _ in load() }
     }
     private func load() {
+        if loadedPath == file.path && image != nil { return }
+        let token = UUID(); request = token
+        loadedPath = file.path
         if let cached = Self.cache.object(forKey: file.path as NSString) { image = cached; return }
         DispatchQueue.global(qos: .userInitiated).async {
             let loaded = UIImage(contentsOfFile: file.path)
             if let loaded = loaded { Self.cache.totalCostLimit = 40 * 1024 * 1024; Self.cache.setObject(loaded, forKey: file.path as NSString, cost: Int(loaded.size.width*loaded.size.height*4)) }
-            DispatchQueue.main.async { image = loaded }
+            DispatchQueue.main.async { if request == token, let loaded = loaded { image = loaded } }
         }
     }
 }

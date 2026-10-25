@@ -12,6 +12,7 @@ enum TravelFormat {
     }
 }
 struct RecordingScreen: View {
+    @Environment(\.displayScale) private var displayScale
     var isVisible = true
     @StateObject private var replay = RouteReplayController()
     @EnvironmentObject var store: TravelStore
@@ -21,12 +22,14 @@ struct RecordingScreen: View {
     @State private var showingFinish = false
     @State private var sheet: TravelSheet?
     @State private var clock = Date()
+    @State private var mapReady = false
     private let timer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
                 GeometryReader { geometry in
                   ZStack(alignment: .bottomTrailing) {
+                    if mapReady && store.ready && isVisible {
                     TravelMap(points: store.activeTrip.map { store.points($0.id) } ?? [], photos: store.activeTrip.map { store.attachments($0.id) } ?? [], photoDirectory: store.files?.directory, diaries: store.activeTrip.map { store.diaries($0.id) } ?? [], fallback: store.currentCoordinate, fitToken: fitToken, recenterToken: recenterToken, follow: follow, isInteractive: isVisible, replay: replay,
                               onCoordinate: { coordinate in
                         guard let trip = store.activeTrip else { return }
@@ -35,18 +38,20 @@ struct RecordingScreen: View {
                         if let trip = store.activeTrip, let value = store.attachments(trip.id).first(where: { $0.id == id }) { sheet = .photo(value) }
                     }, onDiary: { id in
                         if let trip = store.activeTrip, let value = store.diaries(trip.id).first(where: { $0.id == id }) { sheet = .diary(value) }
+                    }, onPhotos: { ids in
+                        if let trip = store.activeTrip { sheet = .photoGroup(store.attachments(trip.id).filter { ids.contains($0.id) }) }
                     }, onUserInteraction: { follow = false })
-                    .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                    .frame(width: geometry.size.width, height: floor(geometry.size.height * displayScale) / displayScale)
+                    } else { Color(UIColor.secondarySystemBackground).overlay(Text(store.ready ? "地图准备中…" : "正在读取本机旅程…").foregroundColor(.secondary)).allowsHitTesting(false) }
                     HStack(spacing: 14) {
                         MapCircleButton(symbol: follow ? "location.fill" : "location", label: "回到当前位置并跟随") { replay.stop(); follow = true; recenterToken += 1 }
                         MapCircleButton(symbol: "arrow.up.left.and.arrow.down.right", label: "查看整段路线") { replay.stop(); follow = false; fitToken += 1 }
                     }.padding()
-                  }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                }.clipped()
-                .overlay(Rectangle().fill(Color(UIColor.systemBackground)).frame(height: 2).allowsHitTesting(false), alignment: .bottom)
+                  }.frame(width: geometry.size.width, height: floor(geometry.size.height * displayScale) / displayScale)
+                }.background(Color(UIColor.systemBackground))
                 VStack(spacing: 14) {
                     if let trip = store.activeTrip {
-                        ReplayControls(controller: replay, points: store.points(trip.id), recording: trip.status == .recording)
+                        ReplayControls(controller: replay, points: store.points(trip.id), recording: trip.status != .ended)
                         HStack {
                             stat(TravelFormat.distance(trip.distance), label: "已记录里程")
                             Spacer()
@@ -61,7 +66,11 @@ struct RecordingScreen: View {
                             }.background(Color.blue).foregroundColor(.white).cornerRadius(12)
                             Button("结束旅程") { showingFinish = true }.padding(.vertical, 13).padding(.horizontal, 22).background(Color(UIColor.secondarySystemBackground)).cornerRadius(12)
                         }
-                        NavigationLink(destination: TripDetailScreen(tripID: trip.id)) { Label("照片、日记与旅程感受", systemImage: "book") }.font(.subheadline)
+                        HStack {
+                            NavigationLink(destination: TripDetailScreen(tripID: trip.id)) { Label("照片与日记", systemImage: "book") }
+                            Spacer()
+                            TripActions(trip: trip, sheet: $sheet)
+                        }.font(.subheadline)
                     } else {
                         VStack(spacing: 6) {
                             Text("把走过的路，留成回忆").font(.headline)
@@ -75,6 +84,7 @@ struct RecordingScreen: View {
                 }.padding().background(Color(UIColor.systemBackground)).fixedSize(horizontal: false, vertical: true)
             }
             .navigationTitle("旅迹").navigationBarTitleDisplayMode(.inline)
+            .onAppear { DispatchQueue.main.asyncAfter(deadline: .now()+0.35) { mapReady = true } }
             .onReceive(timer) { clock = $0 }
             .onDisappear { replay.stop() }
             .onChange(of: isVisible) { visible in if !visible { replay.stop() } }
@@ -92,14 +102,23 @@ struct MemoriesScreen: View {
     @EnvironmentObject var store: TravelStore
     @State private var query = ""
     @State private var deletingTrip: Trip?
-    var filtered: [Trip] { store.trips.filter { query.isEmpty || ($0.title + $0.features + $0.reflection).localizedCaseInsensitiveContains(query) } }
+    @State private var favoritesOnly = false
+    @State private var sheet: TravelSheet?
+    var filtered: [Trip] {
+        store.trips.filter { (!favoritesOnly || $0.isFavorite) && (query.isEmpty || ($0.title + $0.features + $0.reflection + ($0.favoriteReason ?? "")).localizedCaseInsensitiveContains(query)) }
+            .sorted { favoritesOnly ? ($0.favoritedAt ?? .distantPast) > ($1.favoritedAt ?? .distantPast) : $0.startedAt > $1.startedAt }
+    }
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-                    HStack { Image(systemName: "magnifyingglass").foregroundColor(.secondary); TextField("搜索旅程、特点或感受", text: $query) }.padding(12).background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
-                    if filtered.isEmpty {
-                        VStack(spacing: 16) { Image(systemName: "map").font(.system(size: 48)).foregroundColor(.blue); Text(query.isEmpty ? "你的旅行故事，从这里开始" : "没有找到这段回忆").font(.headline); Text("记录路线，留下照片与心情。").foregroundColor(.secondary) }.padding(.vertical, 70)
+                    HStack { Image(systemName: "magnifyingglass").foregroundColor(.secondary); TextField("搜索旅程、特点或收藏理由", text: $query) }.padding(12).background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(12)
+                    Picker("回忆范围", selection: $favoritesOnly) {
+                        Text("全部").tag(false); Text("★ 收藏").tag(true)
+                    }.pickerStyle(SegmentedPickerStyle())
+                    if !store.ready { ProgressView("正在读取本机旅程…") }
+                    if store.ready && filtered.isEmpty {
+                        VStack(spacing: 16) { Image(systemName: "map").font(.system(size: 48)).foregroundColor(.blue); Text(query.isEmpty ? (favoritesOnly ? "还没有收藏的旅程" : "你的旅行故事，从这里开始") : "没有找到这段回忆").font(.headline); Text("记录路线，留下照片与心情。").foregroundColor(.secondary) }.padding(.vertical, 70)
                     }
                     LazyVStack(spacing: 16) {
                         ForEach(filtered) { trip in
@@ -107,16 +126,21 @@ struct MemoriesScreen: View {
                                 NavigationLink(destination: TripDetailScreen(tripID: trip.id)) {
                                     MemoryCard(trip: trip, points: store.points(trip.id), photos: store.attachments(trip.id), files: store.files, places: store.placeNames)
                                 }.buttonStyle(PlainButtonStyle())
+                                HStack {
+                                    TripActions(trip: trip, sheet: $sheet).padding(.leading, 14)
+                                    Spacer()
                                 if trip.status == .ended {
-                                    Button(action: { deletingTrip = trip }) { Label("删除回忆", systemImage: "trash").font(.caption).foregroundColor(.red).padding(12) }
+                                    Button(action: { deletingTrip = trip }) { Image(systemName: "trash").font(.system(size: 22)).foregroundColor(.red).frame(width: 44, height: 44).accessibilityLabel("删除回忆") }
                                         .buttonStyle(PlainButtonStyle())
                                 }
+                                }.padding(.bottom, 10)
                             }.background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(16)
                         }
                     }
                 }.padding()
             }.background(Color(UIColor.systemGroupedBackground).edgesIgnoringSafeArea(.bottom))
             .navigationTitle("回忆")
+            .sheet(item: $sheet) { TravelSheetContent(sheet: $0).environmentObject(store) }
             .alert(item: $deletingTrip) { trip in
                 Alert(title: Text("删除“\(trip.title)”？"), message: Text("这段路线、日记和 App 内的照片副本将被删除，无法恢复。系统相册原图保留。"), primaryButton: .destructive(Text("删除回忆")) { store.deleteTrip(trip.id) }, secondaryButton: .cancel(Text("取消")))
             }
@@ -138,11 +162,12 @@ struct TripDetailScreen: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         ZStack(alignment: .bottomTrailing) {
-                            TravelMap(points: store.points(tripID), photos: store.attachments(tripID), photoDirectory: store.files.directory, diaries: store.diaries(tripID), fitToken: fitToken, replay: replay, onCoordinate: { sheet = .diary(DiaryEntry(tripID: tripID, coordinate: $0, createdAt: Date(), updatedAt: Date())) }, onPhoto: { id in if let value = store.attachments(tripID).first(where: { $0.id == id }) { sheet = .photo(value) } }, onDiary: { id in if let value = store.diaries(tripID).first(where: { $0.id == id }) { sheet = .diary(value) } }).frame(height: 340).clipped()
+                            TravelMap(points: store.points(tripID), photos: store.attachments(tripID), photoDirectory: store.files.directory, diaries: store.diaries(tripID), fitToken: fitToken, replay: replay, onCoordinate: { sheet = .diary(DiaryEntry(tripID: tripID, coordinate: $0, createdAt: Date(), updatedAt: Date())) }, onPhoto: { id in if let value = store.attachments(tripID).first(where: { $0.id == id }) { sheet = .photo(value) } }, onDiary: { id in if let value = store.diaries(tripID).first(where: { $0.id == id }) { sheet = .diary(value) } }, onPhotos: { ids in sheet = .photoGroup(store.attachments(tripID).filter { ids.contains($0.id) }) }).frame(height: 340)
                             MapCircleButton(symbol: "arrow.up.left.and.arrow.down.right", label: "查看整段路线") { replay.stop(); fitToken += 1 }.padding()
                         }
                         VStack(alignment: .leading, spacing: 22) {
-                            ReplayControls(controller: replay, points: store.points(tripID), recording: trip.status == .recording)
+                            TripActions(trip: trip, sheet: $sheet)
+                            ReplayControls(controller: replay, points: store.points(tripID), recording: trip.status != .ended)
                             HStack { Label(TravelFormat.distance(trip.distance), systemImage: "location"); Spacer(); Label(TravelFormat.duration(trip.duration(at: Date())), systemImage: "clock") }.font(.subheadline).foregroundColor(.secondary)
                             Text("轻点地图任意地点，即可写日记。").font(.caption).foregroundColor(.secondary)
                             Button(action: { sheet = .trip(trip) }) {

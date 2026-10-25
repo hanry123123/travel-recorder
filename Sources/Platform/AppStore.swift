@@ -24,10 +24,13 @@ final class TravelStore: ObservableObject {
     private var latestPoint: TrackPoint?
     private var pointCache: [UUID: [TrackPoint]] = [:]
     private let photoQueue = DispatchQueue(label: "travel.photo.processing", qos: .utility)
-    private var imports: [(UUID, String, (@escaping (Result<ImportedPhotoInput, Error>) -> Void) -> Void)] = []
+    private var imports: [(UUID, String, Bool, (@escaping (Result<ImportedPhotoInput, Error>) -> Void) -> Void)] = []
     private var inFlight = Set<String>()
     private var runningImports = 0
     private var scanWork: DispatchWorkItem?
+    private var scanGeneration = UUID()
+    private var scanning = Set<UUID>()
+    private var pendingPhotos: [String: PhotoAttachment] = [:]
     var activeTrip: Trip? { trips.first { $0.status != .ended } }
     var automaticPhotos: Bool { UserDefaults.standard.bool(forKey: "automaticPhotos") }
     var photoAccessDescription: String {
@@ -39,23 +42,32 @@ final class TravelStore: ObservableObject {
         @unknown default: return "请检查相册权限"
         }
     }
-    init(location: LocationSource = DeviceLocationSource(), now: @escaping () -> Date = Date.init) {
+    init(location: LocationSource = DeviceLocationSource(), now: @escaping () -> Date = Date.init, storageRoot: URL? = nil, openRepository: @escaping (URL) throws -> TripRepository = { try CoreDataRepository(url: $0) }) {
         self.location = location
         self.now = now
-        do {
-            let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("TravelRecorder", isDirectory: true)
-            files = try PhotoFileStore(directory: root.appendingPathComponent("Photos", isDirectory: true))
-            placeNames = TripPlaceNames(cacheURL: root.appendingPathComponent("PlaceNames.json"))
-            repository = try CoreDataRepository(url: root.appendingPathComponent("Travel.sqlite"))
-            for trip in try repository.load(Trip.self) where trip.status == .recording { try repository.save(RecorderLogic.recover(trip)) }
-            try reload()
-            ready = true
-        } catch { errorMessage = "无法打开本地数据：\(error.localizedDescription)" }
+        // Publish an immediately usable tab shell; SQLite open/recovery/decoding must
+        // never occupy the UI thread during cold launch.
+        DispatchQueue(label: "travel.bootstrap", qos: .userInitiated).async {
+            do {
+                let root = try storageRoot ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("TravelRecorder", isDirectory: true)
+                let files = try PhotoFileStore(directory: root.appendingPathComponent("Photos", isDirectory: true))
+                let repository = try openRepository(root.appendingPathComponent("Travel.sqlite"))
+                for trip in try repository.load(Trip.self) where trip.status == .recording { try repository.save(RecorderLogic.recover(trip)) }
+                let trips = try repository.load(Trip.self).sorted { $0.startedAt > $1.startedAt }
+                let points = Dictionary(grouping: try repository.load(TrackPoint.self), by: { $0.tripID })
+                DispatchQueue.main.async {
+                    self.files = files; self.repository = repository
+                    self.placeNames = TripPlaceNames(cacheURL: root.appendingPathComponent("PlaceNames.json"))
+                    self.pointCache = points
+                    self.trips = trips; self.ready = true; self.revision += 1
+                    self.foreground()
+                }
+            } catch { DispatchQueue.main.async { self.errorMessage = "无法打开本地数据：\(error.localizedDescription)" } }
+        }
         location.onSamples = { [weak self] samples in self?.receive(samples) }
         location.onAuthorization = { [weak self] in self?.authorizationChanged() }
         location.onFailure = { [weak self] message in self?.locationMessage = message }
         photos.onChange = { [weak self] in self?.schedulePhotoScan() }
-        photos.observe()
     }
     private func reload() throws {
         trips = try repository.load(Trip.self).sorted { $0.startedAt > $1.startedAt }
@@ -68,7 +80,10 @@ final class TravelStore: ObservableObject {
         do { let points = try repository.load(TrackPoint.self, tripID: id); pointCache[id] = points; return points }
         catch { report(error); return [] }
     }
-    func attachments(_ id: UUID) -> [PhotoAttachment] { load(PhotoAttachment.self, id) }
+    func attachments(_ id: UUID) -> [PhotoAttachment] {
+        (savedAttachments(id) + pendingPhotos.values.filter { $0.tripID == id }).sorted { $0.capturedAt < $1.capturedAt }
+    }
+    private func savedAttachments(_ id: UUID) -> [PhotoAttachment] { load(PhotoAttachment.self, id) }
     func diaries(_ id: UUID) -> [DiaryEntry] { load(DiaryEntry.self, id) }
     private func load<T: StoredModel>(_ type: T.Type, _ id: UUID) -> [T] {
         guard ready else { return [] }
@@ -163,68 +178,148 @@ final class TravelStore: ObservableObject {
         }
         revision += 1
     }
-    func foreground() { authorizationChanged(); photos.observe(); schedulePhotoScan() }
+    func foreground() {
+        guard ready else { return }
+        authorizationChanged(); photos.observe()
+        scanGeneration = UUID(); let generation = scanGeneration
+        for delay in [0.0, 2.0, 5.0, 12.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now()+delay) { [weak self] in
+                guard let self = self, self.scanGeneration == generation else { return }
+                self.schedulePhotoScan()
+            }
+        }
+    }
     func setAutomaticPhotos(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: "automaticPhotos")
         if enabled, photos.authorization == .notDetermined { photos.request { self.revision += 1; self.schedulePhotoScan() } }
         else { revision += 1; schedulePhotoScan() }
     }
     private func schedulePhotoScan() {
-        scanWork?.cancel()
+        guard scanWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            self.scanWork = nil
             for trip in self.trips where trip.status != .ended || self.now().timeIntervalSince(trip.endedAt ?? .distantPast) < 172800 { self.scanPhotos(for: trip) }
         }
         scanWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
     func scanPhotos(for trip: Trip, force: Bool = false) {
         guard ready, automaticPhotos || force else { return }
         guard photos.authorization == .authorized || photos.authorization == .limited else { revision += 1; return }
-        let existing = Set(attachments(trip.id).compactMap { $0.assetID })
-        let excluded = Set(load(PhotoExclusion.self, trip.id).map { $0.assetID })
-        for asset in photos.candidates(for: trip, now: now()) {
-            guard let date = asset.creationDate, PhotoMatching.shouldImport(assetID: asset.localIdentifier, capturedAt: date, trip: trip, now: now(), existing: existing, excluded: excluded) else { continue }
-            enqueue(tripID: trip.id, key: asset.localIdentifier) { self.photos.read(asset, completion: $0) }
+        guard scanning.insert(trip.id).inserted else { return }
+        let saved = savedAttachments(trip.id)
+        let capturedNow = now()
+        // PhotoKit may wait for the photo-library daemon after launch/camera use.
+        // Do the queries on the worker, recheck deletion/exclusions on the main queue.
+        photoQueue.async {
+            let assets = self.photos.candidates(for: trip, now: capturedNow)
+            let metadata = saved.filter { $0.coordinate == nil && !$0.manuallyPlaced }.compactMap { photo -> (UUID, Coordinate)? in
+                guard let id = photo.assetID, let location = self.photos.asset(id)?.location else { return nil }
+                return (photo.id, Coordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude))
+            }
+            DispatchQueue.main.async {
+                self.scanning.remove(trip.id)
+                guard let current = self.trip(trip.id), self.automaticPhotos || force else { return }
+                let latest = self.savedAttachments(trip.id)
+                for (id, coordinate) in metadata where coordinate.isValid {
+                    if var photo = latest.first(where: { $0.id == id }), photo.coordinate == nil, !photo.manuallyPlaced {
+                        photo.coordinate = coordinate; photo.originalCoordinate = coordinate
+                        do { try self.repository.save(photo); self.revision += 1 } catch { self.report(error) }
+                    }
+                }
+                let existing = Set(latest.compactMap { $0.assetID })
+                let excluded = Set(self.load(PhotoExclusion.self, trip.id).map { $0.assetID })
+                for asset in assets {
+                    guard let date = asset.creationDate, PhotoMatching.shouldImport(assetID: asset.localIdentifier, capturedAt: date, trip: current, now: self.now(), existing: existing, excluded: excluded) else { continue }
+                    let token = trip.id.uuidString + ":" + asset.localIdentifier
+                    if self.pendingPhotos[token] == nil && !self.inFlight.contains(token) {
+                        self.photos.preview(asset) { [weak self] data in self?.stagePreview(data, asset: asset, tripID: trip.id, token: token) }
+                    }
+                    self.enqueue(tripID: trip.id, key: asset.localIdentifier, automatic: true) { self.photos.read(asset, completion: $0) }
+                }
+            }
         }
     }
+
     func importPhotos(_ results: [PHPickerResult], into tripID: UUID) {
         for result in results {
             let key = result.assetIdentifier ?? UUID().uuidString
-            guard !attachments(tripID).contains(where: { $0.assetID != nil && $0.assetID == result.assetIdentifier }) else { continue }
+            let exclusions = load(PhotoExclusion.self, tripID).filter { $0.assetID == result.assetIdentifier }
+            do { try repository.commit([], deleting: exclusions.map { "exclusion:" + $0.id.uuidString }) }
+            catch { report(error); continue }
+            guard !savedAttachments(tripID).contains(where: { $0.assetID != nil && $0.assetID == result.assetIdentifier }) else { continue }
             enqueue(tripID: tripID, key: key) { self.photos.read(result, completion: $0) }
         }
     }
-    private func enqueue(tripID: UUID, key: String, reader: @escaping (@escaping (Result<ImportedPhotoInput, Error>) -> Void) -> Void) {
+    func excludeSharedPhoto(_ assetID: String, capturedAt: Date) {
+        for trip in trips where PhotoMatching.belongs(capturedAt: capturedAt, to: trip, now: now()) {
+            do { try repository.save(PhotoExclusion(tripID: trip.id, assetID: assetID, sortDate: now())) }
+            catch { report(error) }
+        }
+    }
+    private func stagePreview(_ data: Data, asset: PHAsset, tripID: UUID, token: String) {
+        photoQueue.async {
+            guard let prepared = try? self.files.prepare(data: data, preview: true) else { return }
+            DispatchQueue.main.async {
+                let excluded = self.load(PhotoExclusion.self, tripID).contains { $0.assetID == asset.localIdentifier }
+                guard self.trip(tripID) != nil, self.pendingPhotos[token] == nil,
+                      !excluded, !self.savedAttachments(tripID).contains(where: { $0.assetID == asset.localIdentifier }) else {
+                    self.files.remove(prepared.imageFile); self.files.remove(prepared.thumbnailFile); return
+                }
+                let coordinate = asset.location.map { Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
+                var photo = PhotoAttachment(tripID: tripID, assetID: asset.localIdentifier, capturedAt: asset.creationDate ?? self.now(), importedAt: self.now(), coordinate: coordinate, originalCoordinate: coordinate, imageFile: prepared.imageFile, thumbnailFile: prepared.thumbnailFile)
+                photo.isPreview = true
+                self.pendingPhotos[token] = photo; self.revision += 1
+            }
+        }
+    }
+    private func discardPreview(_ token: String) {
+        if let photo = pendingPhotos.removeValue(forKey: token) { files.remove(photo.imageFile); files.remove(photo.thumbnailFile) }
+    }
+    private func enqueue(tripID: UUID, key: String, automatic: Bool = false, reader: @escaping (@escaping (Result<ImportedPhotoInput, Error>) -> Void) -> Void) {
         let token = tripID.uuidString + ":" + key
         guard !inFlight.contains(token), trip(tripID) != nil else { return }
         inFlight.insert(token)
-        imports.append((tripID, token, reader))
+        imports.append((tripID, token, automatic, reader))
         importCount += 1
         photoMessage = "正在导入照片…"
         pumpImports()
     }
     private func pumpImports() {
         guard runningImports < 2, !imports.isEmpty else { return }
-        let (tripID, token, reader) = imports.removeFirst()
+        let (tripID, token, automatic, reader) = imports.removeFirst()
         runningImports += 1
         reader { result in
             self.photoQueue.async {
                 switch result {
                 case .failure(let error): DispatchQueue.main.async { self.completeImport(token: token, error: error) }
                 case .success(let input):
+                    if automatic && PhotoFileStore.isShareImage(input.data) {
+                        DispatchQueue.main.async {
+                            if let id = input.assetID { self.excludeSharedPhoto(id, capturedAt: input.date ?? self.now()) }
+                            self.discardPreview(token); self.revision += 1
+                            self.completeImport(token: token, error: nil)
+                        }
+                        return
+                    }
                     do {
                         let prepared = try self.files.prepare(data: input.data)
                         DispatchQueue.main.async {
                             do {
                                 guard self.trip(tripID) != nil else { throw TripError.missingTrip }
-                                if let id = input.assetID, self.attachments(tripID).contains(where: { $0.assetID == id }) {
+                                if let id = input.assetID, self.savedAttachments(tripID).contains(where: { $0.assetID == id }) {
                                     self.files.remove(prepared.imageFile); self.files.remove(prepared.thumbnailFile)
                                     self.completeImport(token: token, error: nil); return
                                 }
+                                if let id = input.assetID, self.load(PhotoExclusion.self, tripID).contains(where: { $0.assetID == id }) {
+                                    throw TripError.storage("这张照片已被移除")
+                                }
                                 let coordinate = (input.coordinate ?? prepared.coordinate).flatMap { $0.isValid ? $0 : nil }
-                                let photo = PhotoAttachment(tripID: tripID, assetID: input.assetID, capturedAt: input.date ?? prepared.capturedAt ?? self.now(), importedAt: self.now(), coordinate: coordinate, originalCoordinate: coordinate, captureDateKnown: input.date != nil || prepared.capturedAt != nil, imageFile: prepared.imageFile, thumbnailFile: prepared.thumbnailFile)
+                                var photo = PhotoAttachment(tripID: tripID, assetID: input.assetID, capturedAt: input.date ?? prepared.capturedAt ?? self.now(), importedAt: self.now(), coordinate: coordinate, originalCoordinate: coordinate, captureDateKnown: input.date != nil || prepared.capturedAt != nil, imageFile: prepared.imageFile, thumbnailFile: prepared.thumbnailFile)
+                                if let pending = self.pendingPhotos[token] { photo.id = pending.id }
                                 try self.repository.save(photo)
+                                self.discardPreview(token)
                                 self.revision += 1
                                 self.completeImport(token: token, error: nil)
                             } catch {
@@ -253,6 +348,13 @@ final class TravelStore: ObservableObject {
         merged.features = trip.features; merged.reflection = trip.reflection; merged.updatedAt = now()
         do { try repository.save(merged); try reload(); return true } catch { report(error); return false }
     }
+    @discardableResult func setFavorite(_ id: UUID, reason: String?, enabled: Bool) -> Bool {
+        guard var value = trip(id) else { return false }
+        value.favoritedAt = enabled ? (value.favoritedAt ?? now()) : nil
+        value.favoriteReason = enabled ? reason?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        value.updatedAt = now()
+        do { try repository.save(value); try reload(); return true } catch { report(error); return false }
+    }
     @discardableResult func saveDiary(_ diary: DiaryEntry) -> Bool {
         guard trip(diary.tripID) != nil else { return false }
         var value = diary
@@ -263,6 +365,7 @@ final class TravelStore: ObservableObject {
         do { try repository.commit([], deleting: ["diary:" + diary.id.uuidString]); revision += 1; return true } catch { report(error); return false }
     }
     @discardableResult func place(_ photo: PhotoAttachment, at coordinate: Coordinate) -> Bool {
+        guard photo.isPreview != true else { errorMessage = "完整照片仍在准备，请保存完成后放置。"; return false }
         guard trip(photo.tripID) != nil, let (updated, related) = PhotoEditing.place(photo, at: coordinate, diaries: diaries(photo.tripID)) else { return false }
         do { try repository.commit([StoredRecord(updated)] + related.map { try StoredRecord($0) }, deleting: []); revision += 1; return true } catch { report(error); return false }
     }
@@ -274,6 +377,7 @@ final class TravelStore: ObservableObject {
             var records = try preserved.map { try StoredRecord($0) }
             if let id = photo.assetID { records.append(try StoredRecord(PhotoExclusion(tripID: photo.tripID, assetID: id, sortDate: now()))) }
             try repository.commit(records, deleting: ["photo:" + photo.id.uuidString])
+            for token in Array(pendingPhotos.keys) where pendingPhotos[token]?.id == photo.id { discardPreview(token) }
             files.remove(photo.imageFile); files.remove(photo.thumbnailFile)
             revision += 1
             return true
@@ -284,6 +388,7 @@ final class TravelStore: ObservableObject {
         let images = attachments(id)
         do {
             try repository.deleteTrip(id)
+            for token in Array(pendingPhotos.keys) where pendingPhotos[token]?.tripID == id { discardPreview(token) }
             for photo in images { files.remove(photo.imageFile); files.remove(photo.thumbnailFile) }
             pointCache.removeValue(forKey: id)
             try reload()

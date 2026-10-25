@@ -8,8 +8,8 @@
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>TravelRecorder</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.2.0</string>
-  <key>CFBundleVersion</key><string>6</string>
+  <key>CFBundleShortVersionString</key><string>1.4.1</string>
+  <key>CFBundleVersion</key><string>9</string>
   <key>LSRequiresIPhoneOS</key><true/>
   <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
   <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
@@ -19,6 +19,7 @@
   <key>NSLocationWhenInUseUsageDescription</key><string>在你开始记录旅程后，用位置绘制路线；锁屏或拍照时也会继续记录，直到你暂停或结束。</string>
   <key>NSLocationTemporaryUsageDescriptionDictionary</key><dict><key>RecordTrip</key><string>精确位置用于画出你实际走过的路线。</string></dict>
   <key>NSPhotoLibraryUsageDescription</key><string>查找旅行期间拍摄的照片，读取拍摄时间和位置，并在旅程中保存独立照片副本。</string>
+  <key>NSPhotoLibraryAddUsageDescription</key><string>将你生成的旅程图片或重现视频保存到系统相册，方便分享。</string>
   <key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key><true/>
   <key>ITSAppUsesNonExemptEncryption</key><false/>
 </dict></plist>

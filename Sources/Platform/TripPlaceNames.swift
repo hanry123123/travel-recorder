@@ -3,7 +3,7 @@ import Combine
 import CoreLocation
 import UIKit
 
-/// Visible memory cards share a serial geocoder and a persistent local name cache.
+/// Visible memory cards share a serial geocoder and a session-only name cache.
 final class TripPlaceNames: ObservableObject {
     @Published private(set) var names: [String: String] = [:]
     private let cacheURL: URL
@@ -17,7 +17,9 @@ final class TripPlaceNames: ObservableObject {
     private var activeObserver: NSObjectProtocol?
     init(cacheURL: URL) {
         self.cacheURL = cacheURL
-        if let data = try? Data(contentsOf: cacheURL), let cache = try? JSONDecoder().decode([String: String].self, from: data) { names = cache }
+        // Older versions persisted geocoder results indefinitely. Stop using that
+        // derived cache; original GPS, user writing and photos are untouched.
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: cacheURL) }
         activeObserver = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in self?.pump() }
     }
     deinit {
@@ -62,9 +64,7 @@ final class TripPlaceNames: ObservableObject {
                 if let place = placemarks?.first,
                    let name = MemoryPresentation.placeLabel(locality: place.locality, district: place.subLocality, name: place.name, region: place.administrativeArea ?? place.country) {
                     self.names[key] = name
-                    if let data = try? JSONEncoder().encode(self.names) {
-                        try? data.write(to: self.cacheURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-                    }
+
                 } else if error != nil { self.nextRequest = Date().addingTimeInterval(60) }
                 self.pump()
             }

@@ -1,0 +1,11 @@
+TravelRecorder Android
+Map data: © OpenStreetMap contributors, Open Database License (ODbL).
+https://www.openstreetmap.org/copyright
+Visible map tiles are served by https://tile.openstreetmap.org with attribution,
+an application User-Agent, HTTP caching and conditional revalidation. No offline
+bulk downloads or prefetching are offered. Service availability is best-effort.
+https://operations.osmfoundation.org/policies/tiles/
+Route geometry, user photos and writing in exported posters/videos are rendered
+without third-party map tiles. User content remains the user's responsibility.
+App icon and route/spark rendering are generated in project code. Android system
+UI and fonts are supplied by the device. No third-party runtime SDK is bundled.
