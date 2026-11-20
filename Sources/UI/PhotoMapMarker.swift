@@ -9,12 +9,9 @@ final class PhotoMapMarker: MKAnnotationView {
     private let badge = UILabel()
     func setCount(_ count: Int) {
         badge.text = "\(count)"; badge.isHidden = count < 2
-        accessibilityLabel = count > 1 ? "这里有\(count)张照片，轻点查看" : "旅途照片，轻点查看"
+        accessibilityLabel = count > 1 ? (AppLanguage.english ? "\(count) photos here, tap to view" : "这里有\(count)张照片，轻点查看") : L("旅途照片，轻点查看")
     }
-    private static let cache: NSCache<NSURL, UIImage> = {
-        let cache = NSCache<NSURL, UIImage>(); cache.totalCostLimit = 12*1024*1024; cache.countLimit = 160
-        return cache
-    }()
+    private var imageRequest: PhotoImageRequest?
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         frame = CGRect(x: 0, y: 0, width: 48, height: 54)
@@ -39,31 +36,22 @@ final class PhotoMapMarker: MKAnnotationView {
         badge.font = .systemFont(ofSize: 11, weight: .bold); badge.textAlignment = .center
         badge.layer.cornerRadius = 10; badge.clipsToBounds = true; badge.isHidden = true
         addSubview(badge)
-        isAccessibilityElement = true; accessibilityLabel = "旅途照片，轻点查看"
+        isAccessibilityElement = true; accessibilityLabel = L("旅途照片，轻点查看")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func prepareForReuse() {
-        super.prepareForReuse(); requestID = UUID(); loadedURL = nil; hasActualImage = false; photo.image = nil; setCount(1)
+        super.prepareForReuse(); imageRequest?.cancel(); requestID = UUID(); loadedURL = nil; hasActualImage = false; photo.image = nil; setCount(1)
     }
     func load(_ url: URL?) {
-        if loadedURL == url && hasActualImage { return }; loadedURL = url; hasActualImage = false
+        if loadedURL == url && hasActualImage { return }
+        imageRequest?.cancel(); loadedURL = url; hasActualImage = false
         requestID = UUID(); let request = requestID
-        if photo.image == nil { photo.image = UIImage(systemName: "photo"); photo.tintColor = .secondaryLabel; photo.contentMode = .center }
+        photo.image = UIImage(systemName: "photo"); photo.tintColor = .secondaryLabel; photo.contentMode = .center
         guard let url = url else { return }
-        func apply(_ image: UIImage?) {
-            guard requestID == request, let image = image else { return }
-            hasActualImage = true; photo.contentMode = .scaleAspectFill; photo.image = image
-        }
-        if let image = Self.cache.object(forKey: url as NSURL) { apply(image); return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = UIImage(contentsOfFile: url.path)
-            if let image = image {
-                Self.cache.setObject(image, forKey: url as NSURL, cost: (image.cgImage?.bytesPerRow ?? 0)*(image.cgImage?.height ?? 0))
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.requestID == request, let image = image else { return }
-                self.hasActualImage = true; self.photo.contentMode = .scaleAspectFill; self.photo.image = image
-            }
+        imageRequest = PhotoImageLoader.load(url, edge: 160) { [weak self] image in
+            guard let self = self, self.requestID == request, let image = image else { return }
+            self.hasActualImage = true; self.photo.contentMode = .scaleAspectFill; self.photo.image = image
         }
     }
+    deinit { imageRequest?.cancel() }
 }

@@ -4,13 +4,20 @@ import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 
-struct ImportedPhotoInput {
-    var data: Data
-    var assetID: String?
-    var date: Date?
-    var coordinate: Coordinate?
+struct LibraryPhotoMetadata {
+    let createdAt: Date?
+    let modifiedAt: Date?
+    let coordinate: Coordinate?
 }
-final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
+
+struct LibraryPhotoSnapshot {
+    let authorization: PHAuthorizationStatus
+    let authorizationUnchanged: Bool
+    let assets: [String: LibraryPhotoMetadata]
+    var canConfirmMissing: Bool { authorization == .authorized && authorizationUnchanged }
+}
+
+class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     var onChange: (() -> Void)?
     private var observing = false
     private let observationQueue = DispatchQueue(label: "travel.photo.observation")
@@ -26,7 +33,21 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
     deinit { if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self) } }
-    func photoLibraryDidChange(_ changeInstance: PHChange) { DispatchQueue.main.async { self.onChange?() } }
+    func photoLibraryDidChange(_ changeInstance: PHChange) { DispatchQueue.main.async { NotificationCenter.default.post(name: .travelPhotoLibraryChanged, object: nil); self.onChange?() } }
+    /// Hidden photos remain in the library. Include them so hiding is never treated as deletion.
+    func snapshot(identifiers: [String]) -> LibraryPhotoSnapshot {
+        let before = authorization
+        var assets: [String: LibraryPhotoMetadata] = [:]
+        if before == .authorized || before == .limited {
+            let options = PHFetchOptions(); options.includeHiddenAssets = true
+            PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: options).enumerateObjects { asset, _, _ in
+                assets[asset.localIdentifier] = LibraryPhotoMetadata(createdAt: asset.creationDate,
+                    modifiedAt: asset.modificationDate,
+                    coordinate: asset.location.map { Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) })
+            }
+        }
+        return LibraryPhotoSnapshot(authorization: before, authorizationUnchanged: before == authorization, assets: assets)
+    }
     func candidates(for trip: Trip, now: Date) -> [PHAsset] {
         guard authorization == .authorized || authorization == .limited else { return [] }
         let options = PHFetchOptions()
@@ -34,51 +55,31 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         var assets: [PHAsset] = []
         PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-            if !asset.mediaSubtypes.contains(.photoScreenshot) { assets.append(asset) }
+            if !asset.mediaSubtypes.contains(.photoScreenshot), !self.isSharePoster(asset) { assets.append(asset) }
         }
         return assets
+    }
+    // The system share sheet saves the JPEG without reporting its new Photos ID.
+    // Inspect local originals on the scan queue only for poster-sized candidates.
+    private func isSharePoster(_ asset: PHAsset) -> Bool {
+        let size = SharePosterLayout.posterSize
+        let scale = SharePosterLayout.exportScale
+        guard asset.pixelWidth == Int(size.width * scale),
+              asset.pixelHeight == Int(size.height * scale) else { return false }
+        let options = PHImageRequestOptions()
+        options.version = .original
+        options.isSynchronous = true
+        options.isNetworkAccessAllowed = false
+        var marked = false
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+            if let data = data { marked = PhotoFileStore.isShareImage(data) }
+        }
+        return marked
     }
     func asset(_ identifier: String) -> PHAsset? {
         guard authorization == .authorized || authorization == .limited else { return nil }
         return PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
     }
-    func read(_ asset: PHAsset, completion: @escaping (Result<ImportedPhotoInput, Error>) -> Void) {
-        let lock = NSLock()
-        var completed = false
-        let options = PHImageRequestOptions()
-        options.isNetworkAccessAllowed = true
-        options.deliveryMode = .highQualityFormat
-        options.version = .current
-        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, info in
-            if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
-            lock.lock()
-            if completed { lock.unlock(); return }
-            completed = true; lock.unlock()
-            if let data = data {
-                let location = asset.location.map { Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
-                completion(.success(ImportedPhotoInput(data: data, assetID: asset.localIdentifier, date: asset.creationDate, coordinate: location)))
-            } else {
-                completion(.failure(info?[PHImageErrorKey] as? Error ?? TripError.storage("照片暂不可用，请联网后重试。")))
-            }
-        }
-    }
-    func preview(_ asset: PHAsset, completion: @escaping (Data) -> Void) {
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .fastFormat; options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        PHImageManager.default().requestImage(for: asset, targetSize: CGSize(width: 320, height: 320), contentMode: .aspectFit, options: options) { image, _ in
-            if let data = image?.jpegData(compressionQuality: 0.85) { completion(data) }
-        }
-    }
-    func read(_ result: PHPickerResult, completion: @escaping (Result<ImportedPhotoInput, Error>) -> Void) {
-        if let id = result.assetIdentifier, let asset = asset(id) { read(asset, completion: completion); return }
-        let provider = result.itemProvider
-        guard let type = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else {
-            completion(.failure(TripError.storage("请选择静态照片"))); return
-        }
-        provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
-            if let data = data { completion(.success(ImportedPhotoInput(data: data, assetID: result.assetIdentifier, date: nil, coordinate: nil))) }
-            else { completion(.failure(error ?? TripError.storage("照片暂不可用，请联网后重试。"))) }
-        }
-    }
 }
+
+extension Notification.Name { static let travelPhotoLibraryChanged = Notification.Name("travel.photoLibraryChanged") }

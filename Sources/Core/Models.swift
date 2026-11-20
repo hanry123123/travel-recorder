@@ -56,8 +56,8 @@ struct Trip: StoredModel, Identifiable {
     var updatedAt: Date
     init(now: Date) {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日的旅程"
+        formatter.locale = Locale(identifier: AppLanguage.english ? "en_US_POSIX" : "zh_CN")
+        formatter.dateFormat = AppLanguage.english ? "MMM d 'Trip'" : "M月d日的旅程"
         title = formatter.string(from: now)
         startedAt = now
         updatedAt = now
@@ -87,6 +87,10 @@ struct TrackPoint: StoredModel, Identifiable {
 }
 
 struct PhotoAttachment: StoredModel, Identifiable {
+    var autoLinked: Bool? = nil
+    var libraryLinked: Bool? = nil
+    var libraryRevision: String? = nil
+    var libraryAvailable: Bool? = nil
     var isPreview: Bool?
     static let kind = "photo"
     var id = UUID()
@@ -101,6 +105,15 @@ struct PhotoAttachment: StoredModel, Identifiable {
     var imageFile: String
     var thumbnailFile: String
     var sortDate: Date { capturedAt }
+    func sourceURL(in directory: URL, thumbnail: Bool = true) -> URL {
+        guard libraryLinked == true else { return directory.appendingPathComponent(thumbnail ? thumbnailFile : imageFile) }
+        var url = URLComponents()
+        url.scheme = "travel-photo"; url.host = "asset"
+        url.queryItems = [URLQueryItem(name: "id", value: assetID ?? ""),
+                          URLQueryItem(name: "revision", value: libraryRevision ?? ""),
+                          URLQueryItem(name: "unavailable", value: libraryAvailable == false ? "1" : "0")]
+        return url.url!
+    }
     var mapCoordinate: Coordinate? {
         guard var value = coordinate else { return nil }
         if manuallyPlaced && value.datum == nil { value.datum = .legacyMap }
@@ -136,8 +149,8 @@ enum TripError: LocalizedError {
     case invalidTransition, missingTrip, storage(String)
     var errorDescription: String? {
         switch self {
-        case .invalidTransition: return "当前记录状态不支持这个操作。"
-        case .missingTrip: return "这段旅程已不存在。"
+        case .invalidTransition: return L("当前记录状态不支持这个操作。")
+        case .missingTrip: return L("这段旅程已不存在。")
         case .storage(let message): return "保存失败：\(message)"
         }
     }

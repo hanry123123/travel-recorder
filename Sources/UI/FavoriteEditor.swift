@@ -11,17 +11,17 @@ struct FavoriteEditor: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("为什么想收藏这段旅程？"), footer: Text("可以留空，直接保存。收藏理由不会修改旅程特点与总体感受。")) {
+                Section(header: Text(L("为什么想收藏这段旅程？")), footer: Text(L("可以留空"))) {
                     TextEditor(text: $reason).frame(minHeight: 150)
                 }
                 if trip.isFavorite {
-                    Button("取消收藏") {
+                    Button(L("取消收藏")) {
                         if store.setFavorite(trip.id, reason: nil, enabled: false) { presentation.wrappedValue.dismiss() }
                     }.foregroundColor(.red)
                 }
-            }.navigationTitle(trip.isFavorite ? "编辑收藏" : "收藏旅程")
+            }.navigationTitle(trip.isFavorite ? L("编辑收藏") : L("收藏旅程"))
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarItems(leading: Button("取消") { presentation.wrappedValue.dismiss() }, trailing: Button("保存") {
+            .navigationBarItems(leading: Button(L("取消")) { presentation.wrappedValue.dismiss() }, trailing: Button(L("保存")) {
                 if store.setFavorite(trip.id, reason: reason, enabled: true) { presentation.wrappedValue.dismiss() }
             })
         }.navigationViewStyle(StackNavigationViewStyle())
@@ -37,13 +37,13 @@ struct TripActions: View {
             Button(action: { sheet = .favorite(trip) }) {
                 Image(systemName: trip.isFavorite ? "star.fill" : "star")
                     .font(.system(size: 22)).frame(width: 44, height: 44)
-                    .accessibilityLabel(trip.isFavorite ? "编辑收藏" : "收藏旅程")
+                    .accessibilityLabel(trip.isFavorite ? L("编辑收藏") : L("收藏旅程"))
                     .foregroundColor(trip.isFavorite ? .orange : .blue)
             }
             Button(action: { sheet = .share(store.shareSnapshot(trip.id)) }) {
                 Image(systemName: "square.and.arrow.up")
                     .font(.system(size: 22)).frame(width: 44, height: 44)
-                    .accessibilityLabel("分享旅程")
+                    .accessibilityLabel(L("分享旅程"))
                     .foregroundColor(.blue)
             }
         }.font(.subheadline).buttonStyle(PlainButtonStyle())
@@ -63,14 +63,16 @@ struct PhotoGroupScreen: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))]) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 10)], spacing: 10) {
                     ForEach(currentPhotos) { photo in
                         Button(action: { sheet = .photo(photo) }) {
-                            LocalPhoto(file: store.files.url(photo.thumbnailFile)).frame(height: 140).clipped().cornerRadius(8)
+                            PhotoThumbnail(file: photo.sourceURL(in: store.files.directory), height: 140)
                         }
+                        .buttonStyle(PlainButtonStyle())
+                        .accessibilityLabel(L("查看照片"))
                     }
                 }.padding()
-            }.navigationTitle("这里的照片").navigationBarItems(trailing: Button("完成") { presentation.wrappedValue.dismiss() })
+            }.navigationTitle(L("这里的照片")).navigationBarItems(trailing: Button(L("完成")) { presentation.wrappedValue.dismiss() })
             .sheet(item: $sheet) { TravelSheetContent(sheet: $0).environmentObject(store) }
         }.navigationViewStyle(StackNavigationViewStyle())
     }

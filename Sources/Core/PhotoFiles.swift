@@ -23,7 +23,7 @@ final class PhotoFileStore {
     }
     func url(_ name: String) -> URL { directory.appendingPathComponent(URL(fileURLWithPath: name).lastPathComponent) }
     func prepare(data: Data, preview: Bool = false) throws -> PreparedPhoto {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw TripError.storage("无法读取这张照片") }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw TripError.storage(L("无法读取这张照片")) }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] ?? [:]
         let image = try resized(source, edge: 2560)
         let thumbnail = try resized(source, edge: 320)
@@ -48,17 +48,35 @@ final class PhotoFileStore {
     }
     private func resized(_ source: CGImageSource, edge: Int) throws -> CGImage {
         let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: edge, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw TripError.storage("照片解码失败") }
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw TripError.storage(L("照片解码失败")) }
         return image
     }
     private func jpeg(_ image: CGImage) throws -> Data {
         let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { throw TripError.storage("照片编码失败") }
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { throw TripError.storage(L("照片编码失败")) }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { throw TripError.storage("照片编码失败") }
+        guard CGImageDestinationFinalize(destination) else { throw TripError.storage(L("照片编码失败")) }
         return data as Data
     }
-    func remove(_ file: String) { try? FileManager.default.removeItem(at: url(file)) }
+    func remove(_ file: String) {
+        guard !file.isEmpty, file != ".", file != "..", URL(fileURLWithPath: file).lastPathComponent == file else { return }
+        try? FileManager.default.removeItem(at: url(file))
+    }
+    /// Explicitly requested migration: keep photo identities/writing, delete every app copy.
+    /// Commit references first; repeat cleanup on startup so interruption is recoverable.
+    func migrateToLibraryReferences(repository: TripRepository) throws {
+        let photos = try repository.load(PhotoAttachment.self)
+        let changed = photos.filter { $0.libraryLinked != true || !$0.imageFile.isEmpty || !$0.thumbnailFile.isEmpty }.map { photo -> PhotoAttachment in
+            var result = photo
+            result.libraryLinked = true; result.isPreview = nil
+            result.imageFile = ""; result.thumbnailFile = ""
+            return result
+        }
+        if !changed.isEmpty { try repository.commit(changed.map { try StoredRecord($0) }, deleting: []) }
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) {
+            if try file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory != true { try FileManager.default.removeItem(at: file) }
+        }
+    }
     static func isShareImage(_ data: Data) -> Bool {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],

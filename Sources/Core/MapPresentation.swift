@@ -25,7 +25,7 @@ enum MemoryPresentation {
         String(format: "%.4f,%.4f", locale: Locale(identifier: "en_US_POSIX"), coordinate.latitude, coordinate.longitude)
     }
     static func fallbackPlace(_ coordinate: Coordinate?) -> String {
-        guard let coordinate = coordinate, coordinate.isValid else { return "待记录" }
+        guard let coordinate = coordinate, coordinate.isValid else { return L("待记录") }
         return String(format: "%.3f, %.3f", locale: Locale(identifier: "en_US_POSIX"), coordinate.latitude, coordinate.longitude)
     }
     static func placeLabel(locality: String?, district: String?, name: String?, region: String?) -> String? {

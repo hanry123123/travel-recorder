@@ -46,14 +46,14 @@ def main():
     appicon.mkdir(parents=True, exist_ok=True)
     (assets/'Contents.json').write_text(json.dumps({'info':{'version':1,'author':'xcode'}}))
     entries = []
-    for base in [20,29,40,60]:
+    for base in ([] if "--project-only" in __import__("sys").argv else [20,29,40,60]):
         for scale in [2,3]:
             name=f'icon-{base}@{scale}x.png'
             (appicon/name).write_bytes(icon(base*scale))
             entries.append({'idiom':'iphone','size':f'{base}x{base}','scale':f'{scale}x','filename':name})
-    (appicon/'icon-1024.png').write_bytes(icon(1024))
+    if '--project-only' not in __import__('sys').argv: (appicon/'icon-1024.png').write_bytes(icon(1024))
     entries.append({'idiom':'ios-marketing','size':'1024x1024','scale':'1x','filename':'icon-1024.png'})
-    (appicon/'Contents.json').write_text(json.dumps({'images':entries,'info':{'version':1,'author':'xcode'}},indent=2))
+    if '--project-only' not in __import__('sys').argv: (appicon/'Contents.json').write_text(json.dumps({'images':entries,'info':{'version':1,'author':'xcode'}},indent=2))
     sources=sorted(str(p.relative_to(ROOT)) for p in (ROOT/'Sources').rglob('*.swift'))
     objects=[]
     def obj(key, content): objects.append(f'{ident(key)} = {{ {content} }};')

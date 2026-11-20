@@ -1,6 +1,74 @@
 import SwiftUI
 import MapKit
 
+/// One native surface owns the map, clipping boundary and controls. In particular,
+/// SwiftUI does not composite separate representable views over the live map.
+final class TravelMapHost: UIView {
+    let map = MKMapView()
+    let recenterButton = MapControlButton(frame: .zero)
+    let routeButton = MapControlButton(frame: .zero)
+    private var onRecenter: (() -> Void)?
+    private var onFitRoute: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .systemBackground
+        isOpaque = true
+        clipsToBounds = true
+        addSubview(map)
+        for button in [recenterButton, routeButton] {
+            button.isHidden = true
+            button.backgroundColor = .clear
+            button.isOpaque = false
+            button.contentMode = .redraw
+            button.isAccessibilityElement = true
+            button.accessibilityTraits = .button
+            addSubview(button)
+        }
+        recenterButton.accessibilityLabel = L("回到当前位置并跟随")
+        routeButton.accessibilityLabel = L("查看整段路线")
+        routeButton.symbol = "arrow.up.left.and.arrow.down.right"
+        recenterButton.addTarget(self, action: #selector(recenterPressed), for: .touchUpInside)
+        routeButton.addTarget(self, action: #selector(routePressed), for: .touchUpInside)
+
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(follow: Bool, onRecenter: (() -> Void)?, onFitRoute: (() -> Void)?) {
+        self.onRecenter = onRecenter
+        self.onFitRoute = onFitRoute
+        recenterButton.isHidden = onRecenter == nil
+        routeButton.isHidden = onFitRoute == nil
+        recenterButton.symbol = follow ? "location.fill" : "location"
+        refreshAppearance()
+        setNeedsLayout()
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        map.frame = bounds
+        let scale = max(1, window?.screen.scale ?? contentScaleFactor)
+        var right = floor((bounds.maxX - 16) * scale) / scale
+        let top = floor((bounds.maxY - 60) * scale) / scale
+        for button in [routeButton, recenterButton] where !button.isHidden {
+            button.frame = CGRect(x: right - 44, y: top, width: 44, height: 44)
+            button.contentScaleFactor = scale
+            right -= 58
+        }
+    }
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        refreshAppearance()
+    }
+    private func refreshAppearance() {
+        for button in [recenterButton, routeButton] {
+            button.darkAppearance = traitCollection.userInterfaceStyle == .dark
+            button.setNeedsDisplay()
+        }
+    }
+    @objc private func recenterPressed() { onRecenter?() }
+    @objc private func routePressed() { onFitRoute?() }
+}
+
 struct MapSelection: Identifiable {
     let id = UUID()
     let coordinate: Coordinate
@@ -29,12 +97,15 @@ struct TravelMap: UIViewRepresentable {
     var photoDirectory: URL?
     var diaries: [DiaryEntry] = []
     var selection: Coordinate?
+    var pickingLocation = false
     var fallback: Coordinate?
     var fitToken: Int = 0
     var recenterToken: Int = 0
     var follow = false
     var isInteractive = true
     var replay: RouteReplayController? = nil
+    var onRecenter: (() -> Void)? = nil
+    var onFitRoute: (() -> Void)? = nil
     var onCoordinate: (Coordinate) -> Void = { _ in }
     var onPhoto: (UUID) -> Void = { _ in }
     var onDiary: (UUID) -> Void = { _ in }
@@ -42,12 +113,14 @@ struct TravelMap: UIViewRepresentable {
     var onUserInteraction: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    static func dismantleUIView(_ map: MKMapView, coordinator: Coordinator) {
+    static func dismantleUIView(_ host: TravelMapHost, coordinator: Coordinator) {
         coordinator.replayAnimator.dismantle()
-        map.delegate = nil
+        host.map.delegate = nil
+        host.configure(follow: false, onRecenter: nil, onFitRoute: nil)
     }
-    func makeUIView(context: Context) -> MKMapView {
-        let map = MKMapView()
+    func makeUIView(context: Context) -> TravelMapHost {
+        let host = TravelMapHost(frame: .zero)
+        let map = host.map
         map.delegate = context.coordinator
         map.mapType = .standard
         map.showsCompass = true
@@ -68,9 +141,13 @@ struct TravelMap: UIViewRepresentable {
             map.addGestureRecognizer(gesture)
         }
         map.setRegion(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 30, longitude: 105), span: MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 55)), animated: false)
-        return map
+        return host
     }
-    func updateUIView(_ map: MKMapView, context: Context) {
+    func updateUIView(_ host: TravelMapHost, context: Context) {
+        let map = host.map
+        host.isUserInteractionEnabled = isInteractive
+        host.configure(follow: follow, onRecenter: onRecenter, onFitRoute: onFitRoute)
+
         let coordinator = context.coordinator
         coordinator.parent = self
         map.isUserInteractionEnabled = isInteractive
@@ -109,7 +186,7 @@ struct TravelMap: UIViewRepresentable {
                 coordinator.replayAnimator.followLocation(displayed(last.coordinate), on: map)
             }
         }
-        let photoSignature = (photoDirectory?.path ?? "") + photos.map { "\($0.id):\($0.thumbnailFile):\(String(describing: $0.coordinate))" }.joined(separator: "|")
+        let photoSignature = (photoDirectory?.path ?? "") + photos.map { "\($0.id):\($0.sourceURL(in: photoDirectory ?? URL(fileURLWithPath: "/"))):\(String(describing: $0.coordinate))" }.joined(separator: "|")
         let diarySignature = diaries.map { "\($0.id):\($0.title):\(String(describing: $0.coordinate))" }.joined(separator: "|")
         let pinSignature = [photoSignature, diarySignature, String(describing: selection)].joined(separator: ":")
         if pinSignature != coordinator.pinSignature {
@@ -118,15 +195,15 @@ struct TravelMap: UIViewRepresentable {
             var annotations: [TravelAnnotation] = []
             for photo in photos {
                 if let coordinate = photo.mapCoordinate {
-                    let pin = TravelAnnotation(id: photo.id, kind: "photo", coordinate: displayed(coordinate), title: "旅途照片")
-                    pin.thumbnailURL = photoDirectory?.appendingPathComponent(URL(fileURLWithPath: photo.thumbnailFile).lastPathComponent)
+                    let pin = TravelAnnotation(id: photo.id, kind: "photo", coordinate: displayed(coordinate), title: L("旅途照片"))
+                    pin.thumbnailURL = photoDirectory.map { photo.sourceURL(in: $0) }
                     annotations.append(pin)
                 }
             }
             for diary in diaries where diary.photoID == nil {
-                if let coordinate = diary.mapCoordinate { annotations.append(TravelAnnotation(id: diary.id, kind: "diary", coordinate: displayed(coordinate), title: diary.title.isEmpty ? "地点日记" : diary.title)) }
+                if let coordinate = diary.mapCoordinate { annotations.append(TravelAnnotation(id: diary.id, kind: "diary", coordinate: displayed(coordinate), title: diary.title.isEmpty ? L("地点日记") : diary.title)) }
             }
-            if let coordinate = selection { annotations.append(TravelAnnotation(id: UUID(), kind: "selection", coordinate: displayed(coordinate), title: "选中的位置")) }
+            if let coordinate = selection { annotations.append(TravelAnnotation(id: UUID(), kind: "selection", coordinate: displayed(coordinate), title: L("选中的位置"))) }
             let wanted = Set(annotations.map { $0.identifier })
             map.removeAnnotations(oldPins.filter { !wanted.contains($0.identifier) })
             let byID = Dictionary(uniqueKeysWithValues: oldPins.map { ($0.identifier, $0) })
@@ -200,7 +277,7 @@ struct TravelMap: UIViewRepresentable {
             if let pin = endpoints[kind] {
                 if pin.coordinate.latitude != coordinate.latitude || pin.coordinate.longitude != coordinate.longitude { pin.coordinate = coordinate }
             } else {
-                let pin = TravelAnnotation(id: point.id, kind: kind, coordinate: coordinate, title: kind == "start" ? "起点" : "最近记录的位置")
+                let pin = TravelAnnotation(id: point.id, kind: kind, coordinate: coordinate, title: kind == "start" ? L("起点") : L("最近记录的位置"))
                 endpoints[kind] = pin; map.addAnnotation(pin)
             }
         }
@@ -257,6 +334,12 @@ struct TravelMap: UIViewRepresentable {
                 mapView.deselectAnnotation(cluster, animated: false); return
             }
             guard let annotation = view.annotation as? TravelAnnotation else { return }
+            if parent.pickingLocation {
+                let point = Coordinate(latitude: annotation.coordinate.latitude, longitude: annotation.coordinate.longitude)
+                if point.isValid { parent.onCoordinate(MapCoordinates.storedSelection(point, mode: parent.alignment)) }
+                mapView.deselectAnnotation(annotation, animated: false)
+                return
+            }
             if annotation.kind == "photo" { parent.onPhoto(annotation.identifier); mapView.deselectAnnotation(annotation, animated: false) }
             if annotation.kind == "diary" { parent.onDiary(annotation.identifier); mapView.deselectAnnotation(annotation, animated: false) }
         }

@@ -15,11 +15,15 @@ struct MemoryCard: View {
                 .font(.subheadline).fontWeight(.semibold).foregroundColor(.primary)
                 .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
             GeometryReader { geometry in
+                let routeWidth = max(0, geometry.size.width * 0.45)
+                let photoWidth = max(0, geometry.size.width - routeWidth - 10)
                 HStack(spacing: 10) {
-                    RoutePreview(points: points).frame(width: geometry.size.width*0.45).clipped()
+                    RoutePreview(points: points).frame(width: routeWidth, height: 132).clipped()
                     MemoryPhotoCollage(photos: MemoryPresentation.coverPhotos(photos), files: files)
+                        .frame(width: photoWidth, height: 132).clipped()
                 }
-            }.frame(height: 132)
+                .frame(width: geometry.size.width, height: 132)
+            }.frame(height: 132).clipped()
             HStack {
                 Text(trip.title).font(.headline).foregroundColor(.primary).lineLimit(1)
                 Spacer()
@@ -30,9 +34,9 @@ struct MemoryCard: View {
             HStack {
                 Label(TravelFormat.distance(trip.distance), systemImage: "point.topleft.down.curvedto.point.bottomright.up")
                 Spacer()
-                Label("\(photos.count) 张", systemImage: "photo")
+                Label((AppLanguage.english ? "\(photos.count) photos" : "\(photos.count) 张"), systemImage: "photo")
             }.font(.caption).foregroundColor(.secondary)
-            if let reason = trip.favoriteReason, trip.isFavorite, !reason.isEmpty { Text("收藏理由：" + reason).font(.caption).foregroundColor(.secondary).lineLimit(2) }
+            if let reason = trip.favoriteReason, trip.isFavorite, !reason.isEmpty { Text(L("收藏理由：") + reason).font(.caption).foregroundColor(.secondary).lineLimit(2) }
             if !trip.features.isEmpty { Text(trip.features).font(.caption).foregroundColor(.blue).lineLimit(1) }
         }.padding(14).background(Color(UIColor.secondarySystemGroupedBackground)).cornerRadius(16)
         .onAppear(perform: requestNames)
@@ -48,13 +52,13 @@ private struct MemoryPhotoCollage: View {
     var body: some View {
         GeometryReader { geometry in
             if photos.isEmpty {
-                VStack(spacing: 6) { Image(systemName: "photo"); Text("暂无照片").font(.caption) }
+                VStack(spacing: 6) { Image(systemName: "photo"); Text(L("暂无照片")).font(.caption) }
                     .foregroundColor(.secondary).frame(width: geometry.size.width, height: geometry.size.height)
                     .background(Color(UIColor.tertiarySystemFill)).cornerRadius(9)
             } else if photos.count == 1 {
                 tile(photos[0], width: geometry.size.width, height: geometry.size.height)
             } else {
-                let column = (geometry.size.width-5)/2
+                let column = max(0, (geometry.size.width-5)/2)
                 HStack(spacing: 5) {
                     tile(photos[0], width: column, height: geometry.size.height)
                     if photos.count == 2 { tile(photos[1], width: column, height: geometry.size.height) }
@@ -69,7 +73,7 @@ private struct MemoryPhotoCollage: View {
         }
     }
     private func tile(_ photo: PhotoAttachment, width: CGFloat, height: CGFloat) -> some View {
-        LocalPhoto(file: files.url(photo.thumbnailFile)).id(photo.thumbnailFile)
-            .frame(width: max(1, width), height: max(1, height)).clipped().cornerRadius(7)
+        PhotoThumbnail(file: photo.sourceURL(in: files.directory), height: max(0, height), cornerRadius: 7)
+            .id(photo.id).frame(width: max(0, width))
     }
 }

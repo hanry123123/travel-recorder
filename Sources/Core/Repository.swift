@@ -67,7 +67,7 @@ final class CoreDataRepository: TripRepository {
             request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
             request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: true), NSSortDescriptor(key: "key", ascending: true)]
             return try context.fetch(request).map { object in
-                guard let data = object.value(forKey: "payload") as? Data else { throw TripError.storage("记录内容损坏") }
+                guard let data = object.value(forKey: "payload") as? Data else { throw TripError.storage(L("记录内容损坏")) }
                 return try JSONDecoder().decode(T.self, from: data)
             }
         }

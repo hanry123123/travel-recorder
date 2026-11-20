@@ -14,7 +14,8 @@ else
     fi
 fi
 mkdir -p artifacts/fixtures/tmp
-export TMPDIR="$PWD/artifacts/fixtures/tmp"
+export TMPDIR="${TRAVEL_BUILD_TMP:-$PWD/artifacts/fixtures/tmp}"
+mkdir -p "$TMPDIR"
 LC_ALL=C /usr/bin/shasum -a 256 Sources/Core/*.swift Tests/main.swift > artifacts/fixtures/fixture-input.SHA256SUMS
 "$fixture_swift" -swift-version 5 -target x86_64-apple-macosx11.0 -sdk "$fixture_sdk" -module-cache-path artifacts/fixtures/module-cache \
     Sources/Core/*.swift \

@@ -18,7 +18,7 @@ if app.exists():
     shutil.rmtree(app)  # Generated payload only; prevent stale build files entering IPA.
 app.mkdir(parents=True, exist_ok=True)
 compiled = out/'compiled'; compiled.mkdir(exist_ok=True)
-tmp = out/'tmp'; tmp.mkdir(exist_ok=True)
+tmp = pathlib.Path(os.environ.get('TRAVEL_BUILD_TMP', str(out/'tmp'))); tmp.mkdir(parents=True, exist_ok=True)
 cache = out/'module-cache'; cache.mkdir(exist_ok=True)
 developer = pathlib.Path('/Applications/Xcode.app/Contents/Developer')
 toolchain = developer/'Toolchains/XcodeDefault.xctoolchain/usr/bin'

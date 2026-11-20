@@ -1,121 +1,131 @@
 import SwiftUI
-import AVKit
-import Photos
 
 struct SharedFile: Identifiable { let id = UUID(); let url: URL }
 
 struct TripShareScreen: View {
     let snapshot: TripShareSnapshot
-    @EnvironmentObject private var store: TravelStore
     @Environment(\.presentationMode) private var presentation
     @StateObject private var exporter = TripShareExporter()
-    @State private var video = false
+    @State private var showingPreview = false
     @State private var selected: Set<UUID>
+    @State private var title: String
     @State private var text: String
-    @State private var includeReflection = false
-    @State private var includeDiaries = false
     @State private var activity: SharedFile?
-    @State private var player: AVPlayer?
-    @State private var saveMessage = ""
     init(snapshot: TripShareSnapshot) {
         self.snapshot = snapshot
         _selected = State(initialValue: Set(ShareSelection.representative(snapshot.photos)))
-        _text = State(initialValue: snapshot.trip.features)
+        _title = State(initialValue: "")
+        _text = State(initialValue: "")
     }
-    private var limit: Int { video ? 9 : 3 }
+    private let limit = 3
     private var selectedPhotos: [PhotoAttachment] {
         snapshot.photos.filter { selected.contains($0.id) }.sorted { $0.capturedAt < $1.capturedAt }
     }
-    private var shareText: String {
-        ([text] + (includeReflection ? [snapshot.trip.reflection] : []) + (includeDiaries ? snapshot.diaries.map { $0.title + "\n" + $0.text } : []))
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n\n")
+    private var editedSnapshot: TripShareSnapshot {
+        var trip = snapshot.trip
+        trip.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TripShareSnapshot(trip: trip, points: snapshot.points, photos: snapshot.photos, diaries: snapshot.diaries,
+            photoDirectory: snapshot.photoDirectory, endpoints: SharePosterLayout.limited(trip.title, title: true),
+            capturedAt: snapshot.capturedAt, alignment: snapshot.alignment)
     }
     var body: some View {
-        NavigationView {
+        VStack(spacing: 0) {
+            ShareNavigationBar(showingPreview: showingPreview, canShare: exporter.output != nil, onLeft: {
+                if showingPreview {
+                    exporter.invalidate()
+                    showingPreview = false
+                } else {
+                    exporter.cancel()
+                    presentation.wrappedValue.dismiss()
+                }
+            }, onRight: {
+                if showingPreview {
+                    if let output = exporter.output { activity = SharedFile(url: output) }
+                } else {
+                    generate()
+                }
+            }).frame(height: 52)
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if snapshot.trip.status != .ended { Text("本次内容截至 " + snapshot.capturedAt.formattedShareTime).font(.caption).foregroundColor(.secondary) }
-                    Picker("分享形式", selection: $video) { Text("旅程图片").tag(false); Text("重现视频").tag(true) }.pickerStyle(SegmentedPickerStyle())
-                    Text("照片 · 已选 \(selected.count)/\(limit)").font(.headline)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 85))]) {
-                        ForEach(snapshot.photos) { photo in
-                            Button(action: {
-                                if selected.contains(photo.id) { selected.remove(photo.id) }
-                                else if selected.count < limit { selected.insert(photo.id) }
-                            }) {
-                                ZStack(alignment: .topTrailing) {
-                                    LocalPhoto(file: snapshot.photoDirectory.appendingPathComponent(photo.thumbnailFile)).frame(height: 90).clipped().cornerRadius(8)
-                                    Image(systemName: selected.contains(photo.id) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundColor(selected.contains(photo.id) ? .blue : .white).background(Color.white.opacity(0.65)).clipShape(Circle()).padding(5)
-                                }
-                            }.buttonStyle(PlainButtonStyle())
-                        }
-                    }
-                    Text("以路线形状呈现旅程，包含你选择的照片与文字。").font(.caption).foregroundColor(.secondary)
-                    Text("分享文字").font(.headline)
-                    if video { Text("视频展示文字摘要；长篇日记建议使用旅程图片。").font(.caption).foregroundColor(.secondary) }
-                    TextEditor(text: $text).frame(height: 100).padding(6).background(Color(UIColor.secondarySystemBackground)).cornerRadius(8)
-                    if let reason = snapshot.trip.favoriteReason, !reason.isEmpty { Button("使用收藏理由") { text = reason } }
-                    if !snapshot.trip.reflection.isEmpty { Toggle("加入总体感受", isOn: $includeReflection) }
-                    if !snapshot.diaries.isEmpty { Toggle("加入日记正文", isOn: $includeDiaries) }
-                    if !exporter.busy {
-                        Button(action: generate) { Label(exporter.output == nil ? "生成预览" : "重新生成", systemImage: video ? "film" : "photo").frame(maxWidth: .infinity).padding() }
-                            .background(Color.blue).foregroundColor(.white).cornerRadius(12)
-                    } else {
-                        ProgressView(value: exporter.progress)
-                        HStack { Text(exporter.message).font(.caption); Spacer(); Button("取消生成") { exporter.cancel() } }
-                    }
-                    if !exporter.message.isEmpty && !exporter.busy { Text(exporter.message).font(.caption).foregroundColor(.secondary) }
-                    if let image = exporter.preview { Image(uiImage: image).resizable().scaledToFit().cornerRadius(12) }
-                    if let player = player { VideoPlayer(player: player).frame(height: 380).cornerRadius(12) }
-                    if let output = exporter.output {
-                        HStack {
-                            Button("分享…") { player?.pause(); activity = SharedFile(url: output) }
-                            Spacer()
-                            Button("保存到相册") { save(output) }
-                        }.padding().background(Color(UIColor.secondarySystemBackground)).cornerRadius(12)
-                        Text("在分享面板选择微信；若未显示，可先保存到相册，再从微信发送或发布朋友圈。").font(.caption).foregroundColor(.secondary)
-                    }
-                    if !saveMessage.isEmpty { Text(saveMessage).font(.caption) }
-                }.padding()
+                if showingPreview { previewContent.padding() }
+                else { editorContent.padding() }
             }
-            .navigationTitle("分享旅程").navigationBarTitleDisplayMode(.inline)
-            .navigationBarItems(trailing: Button("完成") { exporter.cancel(); player?.pause(); presentation.wrappedValue.dismiss() })
-            .onChange(of: video) { _ in
-                selected = Set(selectedPhotos.prefix(limit).map { $0.id }); invalidate()
-            }
-            .onChange(of: selected) { _ in invalidate() }
-            .onChange(of: text) { _ in invalidate() }
-            .onChange(of: includeReflection) { _ in invalidate() }
-            .onChange(of: includeDiaries) { _ in invalidate() }
-            .onChange(of: exporter.output) { url in
-                if let url = url, url.pathExtension == "mp4" { player = AVPlayer(url: url) } else { player = nil }
-            }
-            .onDisappear { exporter.cancel(); player?.pause() }
+            .onDisappear { exporter.cancel() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-                if exporter.busy { exporter.cancel(message: "生成已中断，请回到应用后重新生成。") }; player?.pause()
+                if exporter.busy { exporter.cancel(message: L("生成已中断，请回到应用后重新生成。")) }
             }
             .sheet(item: $activity) { ShareActivity(url: $0.url) }
-        }.navigationViewStyle(StackNavigationViewStyle())
+        }.background(Color(UIColor.systemBackground))
     }
-    private func invalidate() { player?.pause(); player = nil; exporter.invalidate(); saveMessage = "" }
-    private func generate() { player?.pause(); player = nil; saveMessage = ""; exporter.generate(snapshot: snapshot, photos: selectedPhotos, text: shareText, video: video) }
-    private func save(_ url: URL) {
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else { DispatchQueue.main.async { saveMessage = "请在设置中允许保存到相册。" }; return }
-            PHPhotoLibrary.shared().performChanges({
-                if url.pathExtension == "mp4" { PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url) }
-                else {
-                    let date = Date()
-                    let request = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: url)
-                    request?.creationDate = date
-                    if let id = request?.placeholderForCreatedAsset?.localIdentifier {
-                        let exclude = { store.excludeSharedPhoto(id, capturedAt: date) }
-                        if Thread.isMainThread { exclude() } else { DispatchQueue.main.sync(execute: exclude) }
-                    }
+    private var editorContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if snapshot.trip.status != .ended { Text(L("本次内容截至 ") + snapshot.capturedAt.formattedShareTime).font(.caption).foregroundColor(.secondary) }
+            HStack {
+                Text(AppLanguage.english ? "Share title" : "分享标题").font(.headline)
+                Spacer()
+                Text("\(title.count)/\(SharePosterLayout.titleLimit)").font(.caption).foregroundColor(.secondary)
+            }
+            ShareTextEditor(text: $title, title: true).frame(height: 64)
+            Text(AppLanguage.english ? "Only changes this shared image" : "只修改这张分享图片的标题").font(.caption).foregroundColor(.secondary)
+            Text((AppLanguage.english ? "Photos · \(selected.count)/\(limit) selected" : "照片 · 已选 \(selected.count)/\(limit)")).font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 10)], spacing: 10) {
+                ForEach(snapshot.photos) { photo in
+                    Button(action: {
+                        if selected.contains(photo.id) { selected.remove(photo.id) }
+                        else if selected.count < limit { selected.insert(photo.id) }
+                    }) {
+                        ZStack(alignment: .topTrailing) {
+                            PhotoThumbnail(file: photo.sourceURL(in: snapshot.photoDirectory), height: 90)
+                            Image(systemName: selected.contains(photo.id) ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(selected.contains(photo.id) ? .blue : .white).background(Color.white.opacity(0.65)).clipShape(Circle()).padding(5)
+                        }.frame(height: 90).contentShape(Rectangle())
+                    }.buttonStyle(PlainButtonStyle())
+                        .accessibilityLabel(AppLanguage.english ? "Select photo" : "选择照片")
+                        .accessibilityValue(selected.contains(photo.id) ? (AppLanguage.english ? "Selected" : "已选择") : (AppLanguage.english ? "Not selected" : "未选择"))
                 }
-            }) { success, error in DispatchQueue.main.async { saveMessage = success ? "已保存到相册" : "保存失败：\(error?.localizedDescription ?? "请重试")" } }
+            }
+            Text(L("在地图上呈现路线，包含你选择的照片与文字。")).font(.caption).foregroundColor(.secondary)
+            HStack {
+                Text(L("分享文字")).font(.headline)
+                Spacer()
+                Text("\(text.count)/\(SharePosterLayout.bodyLimit)").font(.caption).foregroundColor(.secondary)
+            }
+            ShareTextEditor(text: $text).frame(height: 120)
+            Text(AppLanguage.english ? "Up to 120 characters and 5 poster lines. Extra text is not added." : "最多120字、海报中最多5行，超出部分不再加入。").font(.caption).foregroundColor(.secondary)
+            if let reason = snapshot.trip.favoriteReason, !reason.isEmpty {
+                Button(L("使用收藏理由")) { text = SharePosterLayout.limited(reason) }
+            }
+            if !snapshot.trip.reflection.isEmpty {
+                Button(L("加入总体感受")) { appendText(snapshot.trip.reflection) }
+            }
+            if !snapshot.diaries.isEmpty {
+                Button(L("加入日记正文")) { appendText(snapshot.diaries.map { $0.title + "\n" + $0.text }.joined(separator: "\n")) }
+            }
         }
+    }
+    private var previewContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if exporter.busy {
+                ProgressView(value: exporter.progress)
+                HStack {
+                    Text(exporter.message).font(.subheadline)
+                    Spacer()
+                    Button(L("取消生成")) { exporter.cancel() }
+                }
+            } else if let image = exporter.preview {
+                Image(uiImage: image).resizable().scaledToFit().cornerRadius(12)
+            } else {
+                Text(exporter.message).font(.subheadline)
+                Button(L("重试"), action: generate)
+            }
+        }
+    }
+    private func appendText(_ value: String) {
+        text = SharePosterLayout.limited([text, value].filter { !$0.isEmpty }.joined(separator: "\n"))
+    }
+    private func generate() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        showingPreview = true
+        exporter.generate(snapshot: editedSnapshot, photos: selectedPhotos, text: text, useMap: true)
     }
 }
 

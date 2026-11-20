@@ -12,7 +12,18 @@ func check(_ condition: Bool, _ description: String) {
 func mustThrow(_ description: String, _ operation: () throws -> Void) {
     do { try operation(); check(false, description) } catch { check(true, description) }
 }
+check(!AppLanguage.needsWelcome(language: "en", completed: false) && !AppLanguage.needsWelcome(language: "zh-Hans", completed: false), "chosen language enters real app without mandatory tutorial")
+check(AppLanguage.needsWelcome(language: "invalid", completed: true), "invalid language opens bilingual chooser")
+
 let base = Date(timeIntervalSince1970: 1_800_000_000)
+let originalLanguage = UserDefaults.standard.object(forKey: AppLanguage.key)
+UserDefaults.standard.set("en", forKey: AppLanguage.key)
+let englishTitle = Trip(now: base).title
+check(englishTitle.contains("Trip") && !englishTitle.contains("月"), "English default trip title uses an English month")
+UserDefaults.standard.set("zh-Hans", forKey: AppLanguage.key)
+check(Trip(now: base).title.contains("月"), "Chinese default trip title uses original format")
+if let originalLanguage = originalLanguage { UserDefaults.standard.set(originalLanguage, forKey: AppLanguage.key) } else { UserDefaults.standard.removeObject(forKey: AppLanguage.key) }
+
 func sample(_ seconds: Double, _ lat: Double = 31, _ lon: Double = 121, accuracy: Double = 8) -> LocationSample {
     LocationSample(coordinate: Coordinate(latitude: lat, longitude: lon), timestamp: base.addingTimeInterval(seconds), accuracy: accuracy)
 }
@@ -414,6 +425,66 @@ for tick in 0..<600 {
     streamingReplay.advance(by: 0.1)
 }
 check(streamingReplay.state == .live, "continuously growing history still enters live mode within sixty active seconds")
-let report: [String: Any] = ["status":"PASS", "checks":checks, "tested":"production core logic, SQLite persistence, ImageIO import", "ios14_device_tested":false]
+// Explicit migration deletes all old app image copies, preserving references/writing.
+final class FailingMigrationRepository: TripRepository {
+    let underlying: TripRepository
+    init(_ underlying: TripRepository) { self.underlying = underlying }
+    func load<T: StoredModel>(_ type: T.Type, tripID: UUID?) throws -> [T] { try underlying.load(type, tripID: tripID) }
+    func commit(_ records: [StoredRecord], deleting: [String]) throws { throw TripError.storage("Fixture commit failure") }
+    func deleteTrip(_ id: UUID) throws { throw TripError.storage("Fixture delete failure") }
+}
+let migrationRoot = root.appendingPathComponent("library-migration")
+let migrationFiles = try PhotoFileStore(directory: migrationRoot)
+let migrationRepository = try CoreDataRepository(url: root.appendingPathComponent("migration.sqlite"))
+let migrationTrip = Trip(now: base)
+try migrationRepository.save(migrationTrip)
+var legacy = PhotoAttachment(tripID: migrationTrip.id, assetID: "asset/with+symbols=L0/001", capturedAt: base, importedAt: base, coordinate: Coordinate(latitude: 30, longitude: 120), imageFile: "original.jpg", thumbnailFile: "thumb.jpg")
+legacy.manuallyPlaced = true
+var orphan = legacy; orphan.id = UUID(); orphan.assetID = nil; orphan.imageFile = "only-copy.jpg"; orphan.thumbnailFile = "only-thumb.jpg"
+try migrationRepository.save(legacy); try migrationRepository.save(orphan)
+let retainedDiary = DiaryEntry(tripID: migrationTrip.id, photoID: orphan.id, title: "Keep writing", text: "Only image copy is removed", createdAt: base, updatedAt: base)
+try migrationRepository.save(retainedDiary)
+for file in ["original.jpg", "thumb.jpg", "only-copy.jpg", "only-thumb.jpg", "preview-leftover.jpg"] { try Data([1,2,3]).write(to: migrationFiles.url(file)) }
+mustThrow("failed reference commit aborts photo migration") {
+    try migrationFiles.migrateToLibraryReferences(repository: FailingMigrationRepository(migrationRepository))
+}
+check(try FileManager.default.contentsOfDirectory(atPath: migrationRoot.path).count == 5, "failed reference commit leaves every image untouched")
+check(try migrationRepository.load(PhotoAttachment.self).allSatisfy { $0.libraryLinked == nil }, "failed migration keeps original metadata")
+try migrationFiles.migrateToLibraryReferences(repository: migrationRepository)
+let migrated = try migrationRepository.load(PhotoAttachment.self)
+check(migrated.count == 2 && migrated.allSatisfy { $0.libraryLinked == true && $0.imageFile.isEmpty && $0.thumbnailFile.isEmpty }, "migration keeps both photo records as library references")
+check(try FileManager.default.contentsOfDirectory(atPath: migrationRoot.path).isEmpty, "migration deletes originals thumbnails orphan-only copies and leftover previews")
+check(try migrationRepository.load(DiaryEntry.self).first?.text == retainedDiary.text, "photo migration preserves attached diary")
+let linked = migrated.first { $0.id == legacy.id }!
+check(linked.manuallyPlaced && linked.coordinate == legacy.coordinate && linked.assetID == legacy.assetID, "migration preserves manual coordinate and asset identifier")
+let librarySourceURL = linked.sourceURL(in: migrationRoot)
+check(librarySourceURL.scheme == "travel-photo" && URLComponents(url: librarySourceURL, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value == legacy.assetID, "library URL safely roundtrips identifiers with slashes and symbols")
+try migrationFiles.migrateToLibraryReferences(repository: migrationRepository)
+check(try migrationRepository.load(PhotoAttachment.self).count == 2, "reference migration can be repeated safely")
+try Data([4,5,6]).write(to: migrationFiles.url("interrupted-cleanup.jpg"))
+try migrationFiles.migrateToLibraryReferences(repository: migrationRepository)
+check(try FileManager.default.contentsOfDirectory(atPath: migrationRoot.path).isEmpty, "already migrated references still retry interrupted image cleanup")
+migrationFiles.remove(""); migrationFiles.remove(".."); migrationFiles.remove("../outside.jpg")
+check(FileManager.default.fileExists(atPath: migrationRoot.path), "empty legacy file names cannot delete the photo directory")
+let oldJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as! [String: Any]
+var noNewFields = oldJSON; noNewFields.removeValue(forKey: "libraryLinked"); noNewFields.removeValue(forKey: "autoLinked")
+let decodedLegacy = try JSONDecoder().decode(PhotoAttachment.self, from: JSONSerialization.data(withJSONObject: noNewFields))
+check(decodedLegacy.id == legacy.id && decodedLegacy.libraryLinked == nil, "old photo JSON remains decodable")
+
+var idle = InactivityReminderState(tripID: migrationTrip.id, since: base, paused: false)
+check(idle.observe(sample(0), now: base), "first accurate position starts inactivity timing")
+let firstDue = idle.due
+check(firstDue == base.addingTimeInterval(7200), "inactivity threshold is exactly two hours")
+check(!idle.observe(sample(100, 31.00005), now: base.addingTimeInterval(100)) && idle.due == firstDue, "small GPS drift does not postpone reminder")
+check(!idle.observe(sample(200, 31.01, accuracy: 150), now: base.addingTimeInterval(200)), "poor GPS accuracy cannot reset reminder")
+check(!idle.observe(sample(90, 31.01), now: base.addingTimeInterval(200)), "out of order locations cannot reset reminder")
+check(!idle.observe(sample(220, 31.01), now: base.addingTimeInterval(500)), "stale locations cannot reset reminder")
+check(idle.observe(sample(300, 31.001), now: base.addingTimeInterval(300)) && idle.due == base.addingTimeInterval(7500), "real movement resets deadline from latest movement")
+check(!idle.observe(sample(400, 31.00104), now: base.addingTimeInterval(400)) && idle.due == base.addingTimeInterval(7500), "repeated stationary samples keep the same deadline")
+let restoredIdle = try JSONDecoder().decode(InactivityReminderState.self, from: JSONEncoder().encode(idle))
+check(restoredIdle == idle, "inactivity state survives relaunch")
+idle.paused = true
+check(!idle.observe(sample(600, 32), now: base.addingTimeInterval(600)), "paused reminder does not pretend to observe movement")
+let report: [String: Any] = ["status":"PASS", "checks":checks, "tested":"production core logic, SQLite persistence, photo reference migration, inactivity timing", "ios14_device_tested":false]
 try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: root.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("report.json"))
 print("FIXTURES PASS: \(checks) checks; device behavior still pending")

@@ -1,60 +1,57 @@
 import SwiftUI
 
-/// Draw the circle directly at the view's display scale, without a cached texture.
+/// Borderless native control: a filled vector disk and a separate template icon.
+/// No bitmap background, stroked path, rounded clipping mask, or default button chrome.
 final class MapControlButton: UIControl {
-    var symbol = "location.fill"
-    var darkAppearance = false
-    override func draw(_ rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext() else { return }
-        context.setFillColor((darkAppearance ? UIColor.black : UIColor.white).cgColor)
-        let inset = 1 / max(1, contentScaleFactor)
-        context.fillEllipse(in: bounds.insetBy(dx: inset, dy: inset))
+    private let disk = CAShapeLayer()
+    private let icon = UIImageView()
+    var symbol = "location.fill" { didSet { if symbol != oldValue { updateIcon() } } }
+    var darkAppearance = false { didSet { updateFill() } }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        layer.borderWidth = 0
+        layer.shadowOpacity = 0
+        layer.shouldRasterize = false
+        disk.strokeColor = nil
+        disk.lineWidth = 0
+        disk.shadowOpacity = 0
+        layer.addSublayer(disk)
+        icon.contentMode = .center
+        icon.tintColor = .systemBlue
+        icon.isUserInteractionEnabled = false
+        icon.isAccessibilityElement = false
+        addSubview(icon)
+        updateIcon()
+        updateFill()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        disk.frame = bounds
+        disk.contentsScale = max(1, window?.screen.scale ?? contentScaleFactor)
+        disk.path = UIBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).cgPath
+        icon.frame = bounds
+        CATransaction.commit()
+    }
+    override func accessibilityActivate() -> Bool {
+        guard isEnabled, isUserInteractionEnabled, !isHidden else { return false }
+        sendActions(for: .touchUpInside)
+        return true
+    }
+    private func updateFill() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        disk.fillColor = (darkAppearance ? UIColor(white: 0.18, alpha: 1) : UIColor.white).cgColor
+        CATransaction.commit()
+    }
+    private func updateIcon() {
         let configuration = UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-        if let icon = UIImage(systemName: symbol, withConfiguration: configuration)?.withTintColor(.systemBlue, renderingMode: .alwaysOriginal) {
-            let size = icon.size
-            icon.draw(in: CGRect(x: (bounds.width-size.width)/2, y: (bounds.height-size.height)/2, width: size.width, height: size.height))
-        }
-    }
-}
-
-struct MapCircleButton: View {
-    let symbol: String
-    let label: String
-    var action: () -> Void
-    var body: some View {
-        NativeMapButton(symbol: symbol, label: label, action: action).frame(width: 44, height: 44)
-    }
-}
-
-private struct NativeMapButton: UIViewRepresentable {
-    @Environment(\.colorScheme) private var colorScheme
-    let symbol: String
-    let label: String
-    let action: () -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(action) }
-    func makeUIView(context: Context) -> MapControlButton {
-        let button = MapControlButton(frame: .zero)
-        button.backgroundColor = .clear
-        button.isOpaque = false
-        button.layer.borderWidth = 0; button.layer.shadowOpacity = 0
-        button.layer.shouldRasterize = false
-        button.layer.masksToBounds = false
-        button.contentMode = .redraw
-        button.isAccessibilityElement = true
-        button.accessibilityTraits = .button
-        button.addTarget(context.coordinator, action: #selector(Coordinator.pressed), for: .touchUpInside)
-        return button
-    }
-    func updateUIView(_ button: MapControlButton, context: Context) {
-        context.coordinator.action = action
-        button.symbol = symbol; button.darkAppearance = colorScheme == .dark
-        button.accessibilityLabel = label
-        button.setNeedsDisplay()
-    }
-    final class Coordinator: NSObject {
-        var action: () -> Void
-        init(_ action: @escaping () -> Void) { self.action = action }
-        @objc func pressed() { action() }
+        icon.image = UIImage(systemName: symbol, withConfiguration: configuration)?.withRenderingMode(.alwaysTemplate)
     }
 }
 
@@ -77,7 +74,7 @@ struct ReplayControls: View {
                         .background(Capsule().fill(Color.blue.opacity(0.1)))
                 }.buttonStyle(PlainButtonStyle()).foregroundColor(.blue).disabled(points.isEmpty)
                 if controller.isPresenting {
-                    Button(controller.state == .finished ? "收起" : "停止重现") { controller.stop() }
+                    Button(action: { controller.stop() }) { Text(controller.state == .finished ? L("收起") : L("停止重现")) }
                         .font(.subheadline).buttonStyle(PlainButtonStyle())
                 }
                 Spacer(minLength: 0)
@@ -87,12 +84,9 @@ struct ReplayControls: View {
                 HStack {
                     Text(points.first?.timestamp ?? Date(), style: .time)
                     Spacer()
-                    if recording { Text("最新") }
+                    if recording { Text(L("最新")) }
                     Text(points.last?.timestamp ?? Date(), style: .time)
                 }.font(.caption2).foregroundColor(.secondary)
-                if !controller.followsHead {
-                    Button("跟随光点") { controller.followHead() }.font(.caption)
-                }
             }
         }
         .onChange(of: "\(points.count):\(points.last?.id.uuidString ?? ""):\(recording)") { _ in
@@ -101,11 +95,11 @@ struct ReplayControls: View {
     }
     private var title: String {
         switch controller.state {
-        case .idle: return "路途重现"
-        case .playing: return "暂停重现"
-        case .live: return "实时跟随 · 暂停"
-        case .paused: return "继续重现"
-        case .finished: return "再看一遍"
+        case .idle: return L("路途重现")
+        case .playing: return L("暂停重现")
+        case .live: return L("实时跟随")
+        case .paused: return L("继续重现")
+        case .finished: return L("再看一遍")
         }
     }
 }
@@ -121,7 +115,7 @@ private struct ReplayProgressControl: View {
     }()
     private var timeText: String {
         guard let date = progress.position.recordedAt else { return "" }
-        return Self.timestamp.string(from: date) + (progress.position.inGap ? " · 暂停" : "")
+        return Self.timestamp.string(from: date) + (progress.position.inGap ? L(" · 暂停") : "")
     }
     var body: some View {
         GeometryReader { geometry in
@@ -147,8 +141,8 @@ private struct ReplaySlider: UIViewRepresentable {
     func makeUIView(context: Context) -> UISlider {
         let slider = UISlider()
         slider.minimumValue = 0; slider.maximumValue = 1; slider.isContinuous = true
-        slider.minimumTrackTintColor = UIColor(red: 1, green: 0.87, blue: 0.48, alpha: 1)
-        slider.maximumTrackTintColor = .systemBlue
+        slider.minimumTrackTintColor = .systemBlue
+        slider.maximumTrackTintColor = UIColor(red: 1, green: 0.87, blue: 0.48, alpha: 1)
         let thumb = UIGraphicsImageRenderer(size: CGSize(width: 34, height: 34)).image { renderer in
             let cg = renderer.cgContext
             cg.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: UIColor.black.withAlphaComponent(0.14).cgColor)
@@ -157,7 +151,7 @@ private struct ReplaySlider: UIViewRepresentable {
         }
         slider.setThumbImage(thumb, for: .normal)
         slider.setThumbImage(thumb, for: .highlighted)
-        slider.accessibilityLabel = "路线重现进度"
+        slider.accessibilityLabel = L("路线重现进度")
         slider.addTarget(context.coordinator, action: #selector(Coordinator.begin), for: .touchDown)
         slider.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
         slider.addTarget(context.coordinator, action: #selector(Coordinator.end), for: [.touchUpInside, .touchUpOutside, .touchCancel])

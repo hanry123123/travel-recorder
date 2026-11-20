@@ -139,6 +139,7 @@ final class MapReplayAnimator: NSObject {
     private func followIfNeeded(force: Bool = false) {
         guard let map = map, let controller = controller, controller.followsHead else { stopCamera(); return }
         guard let position = worldPoint(at: elapsed)?.0 else { camera.stop(); return }
+        if force { cameraEngaged = true }
         if !cameraEngaged {
             if mapPoints.allSatisfy({ map.bounds.insetBy(dx: 20, dy: 20).contains(map.convert($0.coordinate, toPointTo: map)) }) { return }
             let safe = map.bounds.insetBy(dx: map.bounds.width*0.22, dy: map.bounds.height*0.22)

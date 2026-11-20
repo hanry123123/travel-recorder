@@ -39,7 +39,7 @@ final class DeviceLocationSource: NSObject, LocationSource, CLLocationManagerDel
         onSamples?(locations.map { LocationSample(coordinate: Coordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude), timestamp: $0.timestamp, accuracy: $0.horizontalAccuracy) }.sorted { $0.timestamp < $1.timestamp })
     }
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        if let error = error as? CLError, error.code == .locationUnknown { onFailure?("暂时无法定位，恢复信号后继续记录。") }
+        if let error = error as? CLError, error.code == .locationUnknown { onFailure?(L("暂时无法定位，恢复信号后继续记录。")) }
         else { onFailure?(error.localizedDescription) }
     }
 }

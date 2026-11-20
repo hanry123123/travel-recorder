@@ -11,7 +11,8 @@ sdk=dev/'Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
 support=sdk/'System/iOSSupport'
 sources=sorted(p for p in (root/'Sources').rglob('*.swift') if p.name!='TravelRecorderApp.swift')
 cmd=[str(dev/'Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc'),'-swift-version','5','-O','-target','x86_64-apple-ios14.0-macabi','-sdk',str(sdk),'-F',str(support/'System/Library/Frameworks'),'-I',str(support/'usr/include'),'-L',str(support/'usr/lib'),'-module-cache-path',str(out/'module-cache')]+list(map(str,sources))+[str(root/'Tests/SharePreview/main.swift'),'-o',str(out/'share-fixture')]
-env=dict(os.environ,DEVELOPER_DIR=str(dev),TMPDIR=str(out/'tmp'))
+tmp=Path(os.environ.get('TRAVEL_BUILD_TMP',str(out/'tmp')));tmp.mkdir(parents=True,exist_ok=True)
+env=dict(os.environ,DEVELOPER_DIR=str(dev),TMPDIR=str(tmp))
 with (out/'compile.log').open('w') as log:subprocess.run(cmd,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
 with (out/'run.log').open('w') as log:subprocess.run([str(out/'share-fixture'),str(out/'output')],cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=240)
 print((out/'run.log').read_text())
